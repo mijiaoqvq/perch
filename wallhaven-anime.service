@@ -1,0 +1,11 @@
+[Unit]
+Description=Download SFW anime 4K wallpapers and keep 20
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/bin/wallhaven-anime.py
+Environment=PYTHONUNBUFFERED=1
+TimeoutStartSec=45min
+UMask=0077
+Nice=10
+NoNewPrivileges=yes
