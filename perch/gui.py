@@ -20,6 +20,8 @@ from . import __version__
 from .config import save
 from . import scheduler
 from .desktop import set_wallpaper
+from .downloader import Client
+from .recommendation import TagFetcher, sync_feedback
 
 CSS = """
 window { background: #141a1b; color: #e5eae8; }
@@ -54,6 +56,7 @@ button { border-radius: 8px; }
 .card-footer { padding: 12px 13px; }
 .card-id { font-weight: 700; font-size: 13px; }
 .favorite { color: #b5dec8; background: #2a4239; }
+.liked { color: #f1b0ba; background: #493139; }
 .pill { background: #263c34; color: #acd2bc; border-radius: 14px; padding: 6px 12px; font-size: 11px; }
 .footer { padding-top: 16px; }
 .log { font-family: monospace; font-size: 12px; padding: 18px; background: #192122; color: #b6cec4; }
@@ -134,6 +137,10 @@ class PerchWindow(Adw.ApplicationWindow):
         self.job_kind = None
         self.job_output = None
         self.replacement_preview = None
+        self.tag_sync_busy = False
+        self.tag_sync_requested = False
+        self.tag_sync_pending = set()
+        self.tag_sync_callbacks = []
         self.status_busy = False
         self.refresh_busy = False
         self.library_signature = None
@@ -164,6 +171,7 @@ class PerchWindow(Adw.ApplicationWindow):
         self.nav.add_css_class("navigation-sidebar")
         for key, title, icon in (("library", "全部壁纸", "view-grid-symbolic"),
                                  ("favorites", "我的收藏", "starred-symbolic"),
+                                 ("likes", "我喜欢的", "emblem-favorite-symbolic"),
                                  ("settings", "偏好设置", "emblem-system-symbolic"),
                                  ("activity", "更新记录", "document-open-recent-symbolic")):
             row = Gtk.ListBoxRow()
@@ -223,16 +231,19 @@ class PerchWindow(Adw.ApplicationWindow):
         if row is None:
             return
         self.page_name = row.page
-        if row.page in ("library", "favorites"):
+        if row.page in ("library", "favorites", "likes"):
             self.stack.set_visible_child_name("gallery")
-            self.gallery_title.set_text("我的收藏" if row.page == "favorites" else "让桌面，常有新风景。")
-            self.gallery_sub.set_text("喜欢就留下。这里的壁纸不会被自动清理。" if row.page == "favorites" else
-                                      "发现、收藏，让每一次打开桌面都有好心情。")
+            self.gallery_title.set_text({"favorites": "我的收藏", "likes": "我喜欢的"}.get(row.page, "让桌面，常有新风景。"))
+            self.gallery_sub.set_text({"favorites": "收藏的壁纸不会被自动清理。喜欢和收藏可以分别设置。",
+                                       "likes": "喜欢用来表达偏好，仍会参与清理。这里只显示还在本地的图片。"}.get(
+                                           row.page, "喜欢让推荐更懂你，收藏让风景留下来。"))
             self.render_gallery()
         else:
             self.stack.set_visible_child_name(row.page)
         if row.page == "activity":
             self.read_logs()
+        elif row.page == "settings":
+            self.refresh_profile()
 
     def build_gallery(self):
         page = box(css="page")
@@ -244,6 +255,7 @@ class PerchWindow(Adw.ApplicationWindow):
         self.gallery_title = label("让桌面，常有新风景。", "page-title")
         titles.append(self.gallery_title)
         self.gallery_sub = label("", "page-subtitle")
+        self.gallery_sub.set_wrap(True)
         titles.append(self.gallery_sub)
         heading.append(titles)
         self.update_button = button("立即更新", "view-refresh-symbolic", self.start_update, "suggested-action")
@@ -347,13 +359,14 @@ class PerchWindow(Adw.ApplicationWindow):
 
     @staticmethod
     def signature(items):
-        return tuple((str(i.path), i.modified, i.size, i.favorite, i.disliked) for i in items)
+        return tuple((str(i.path), i.modified, i.size, i.favorite, i.disliked, i.liked) for i in items)
 
     def render_gallery(self):
         if not hasattr(self, "flow"):
             return
         self.flow.remove_all()
         items = [i for i in self.items if (self.page_name != "favorites" or i.favorite)
+                 and (self.page_name != "likes" or i.liked)
                  and self.search.get_text().lower() in i.path.name.lower()]
         if self.order.get_selected() == 1:
             items.reverse()
@@ -364,7 +377,8 @@ class PerchWindow(Adw.ApplicationWindow):
         self.fav_stat.set_text(str(favorites))
         self.size_stat.set_text(f"{sum(i.size for i in self.items) / 1024**2:.0f}")
         self.rule_label.set_text(f"保留 {self.config.keep} 张普通壁纸  ·  每次新增 {self.config.batch} 张  ·  收藏额外保存")
-        self.count_label.set_text(f"{len(items)} 张壁纸  /  {favorites} 张收藏受到保护")
+        liked = sum(item.liked for item in self.items)
+        self.count_label.set_text(f"{len(items)} 张壁纸  /  {liked} 张喜欢  /  {favorites} 张收藏受保护")
         self.gallery_stack.set_visible_child_name("images" if items else "empty")
         if self.search.get_text():
             self.empty.set_title("没有找到这张壁纸")
@@ -372,6 +386,9 @@ class PerchWindow(Adw.ApplicationWindow):
         elif self.page_name == "favorites":
             self.empty.set_title("把喜欢的风景留下来")
             self.empty.set_description("点击壁纸上的星标即可收藏，收藏不会计入普通壁纸保留数量。")
+        elif self.page_name == "likes":
+            self.empty.set_title("告诉栖景，你喜欢什么")
+            self.empty.set_description("点击爱心表示喜欢；喜欢仍可能被清理，清理后偏好记录会保留。")
         else:
             self.empty.set_title("这里，等待一片风景。")
             self.empty.set_description("点击「立即更新」，或在偏好设置中选择已有壁纸目录。")
@@ -397,16 +414,40 @@ class PerchWindow(Adw.ApplicationWindow):
             actions.append(title)
             metadata = (f"{width} × {height}  ·  {item.size / 1024**2:.1f} MB" if width else "无法读取图片")
             actions.append(self.dislike_button(item))
+            actions.append(self.like_button(item))
             star = button(icon="starred-symbolic" if item.favorite else "non-starred-symbolic",
                           action=lambda i=item: self.toggle_favorite(i),
                           css="favorite" if item.favorite else "flat",
-                          tooltip="取消收藏" if item.favorite else "收藏，保护此壁纸")
+                          tooltip="取消收藏（喜欢状态不变）" if item.favorite else "收藏，保留图片不被清理")
             star.set_valign(Gtk.Align.CENTER)
             actions.append(star)
             footer.append(actions)
             footer.append(label("不喜欢 · 等待替换" if item.disliked else metadata, "caption"))
             card.append(footer)
             self.flow.append(card)
+
+    def like_button(self, item, preview=None):
+        widget = button(text=("取消喜欢" if item.liked else "喜欢") if preview else None,
+                        icon="emblem-favorite-symbolic", css="liked" if item.liked else "flat",
+                        tooltip="取消喜欢，收藏状态不变" if item.liked else "喜欢，影响推荐但仍可能被清理")
+        def clicked():
+            self.toggle_like(item)
+            if preview:
+                preview.close()
+        widget.connect("clicked", lambda *_: clicked())
+        widget.set_valign(Gtk.Align.CENTER)
+        return widget
+
+    def toggle_like(self, item):
+        library = self.library
+        def done(_, error):
+            if not error:
+                self.toast("已取消喜欢，收藏状态不变" if item.liked else "已喜欢，推荐会参考它的标签；图片仍会参与清理")
+                self.refresh_library()
+                self.refresh_profile()
+                if not item.liked:
+                    self.sync_tags(item.wid)
+        self.task(lambda: library.set_liked(item.wid, not item.liked), done)
 
     def dislike_button(self, item, preview=None):
         tooltip = "先取消收藏，再点击不喜欢" if item.favorite else "不喜欢，换一张新壁纸"
@@ -437,6 +478,9 @@ class PerchWindow(Adw.ApplicationWindow):
             if not error:
                 self.toast("已取消收藏，将按保留数量参与清理" if item.favorite else "已收藏，自动清理会跳过这张壁纸")
                 self.refresh_library()
+                self.refresh_profile()
+                if not item.favorite:
+                    self.sync_tags(item.wid)
         self.task(lambda: library.set_favorite(item.wid, not item.favorite), done)
 
     def open_uri(self, uri):
@@ -471,12 +515,24 @@ class PerchWindow(Adw.ApplicationWindow):
             win.close()
         star.connect("clicked", lambda *_: favorite())
         actions.append(star)
+        actions.append(self.like_button(item, win))
         actions.append(self.dislike_button(item, win))
         spacer = box()
         spacer.set_hexpand(True)
         actions.append(spacer)
         actions.append(button("设为桌面壁纸", "preferences-desktop-wallpaper-symbolic",
                               lambda: self.apply_wallpaper(item), "suggested-action"))
+        tags_row = box(Gtk.Orientation.HORIZONTAL, 12)
+        tags_row.set_margin_start(20)
+        tags_row.set_margin_end(20)
+        tag_label = label(self.tag_text(item.wid), "caption", wrap=True)
+        tag_label.set_hexpand(True)
+        tags_row.append(tag_label)
+        def update_tags():
+            if win.get_visible():
+                tag_label.set_text(self.tag_text(item.wid))
+        tags_row.append(button("同步标签", action=lambda: self.sync_tags(item.wid, update_tags)))
+        root.append(tags_row)
         root.append(actions)
         win.set_child(root)
         win.present()
@@ -488,6 +544,68 @@ class PerchWindow(Adw.ApplicationWindow):
             return
         self.task(lambda: set_wallpaper(item.path, self.config.wallpaper_backend),
                   lambda _, error: self.toast("已设为桌面壁纸") if not error else None)
+
+    def tag_text(self, wid):
+        tags = self.library.tags_for(wid)
+        if tags is None:
+            return "标签尚未同步；同步后用于个性化推荐。"
+        return "标签：" + " · ".join(tag['name'] for tag in tags) if tags else "Wallhaven 暂无标签"
+
+    def refresh_profile(self):
+        library, config = self.library, self.config
+        def work():
+            feedback = library.feedback(config.favorites_influence)
+            pending = sum(library.tags_for(wid) is None for wid in feedback)
+            return feedback, pending, library.tag_profile(config.favorites_influence)
+        def done(result, error):
+            if error or library is not self.library:
+                return
+            feedback, pending, profile = result
+            positive = [tag['name'] for tag in profile if tag['weight'] > 0][:8]
+            negative = [tag['name'] for tag in reversed(profile) if tag['weight'] < 0][:8]
+            self.profile_label.set_text(
+                f"已记录 {sum(v > 0 for v in feedback.values())} 张正面反馈、"
+                f"{sum(v < 0 for v in feedback.values())} 张不喜欢 · {pending} 张待同步标签\n"
+                "更多尝试：" + ("、".join(positive) or "还没有足够的标签") + "\n"
+                "减少推荐：" + ("、".join(negative) or "暂无")
+            )
+        self.task(work, done)
+
+    def sync_tags(self, wid=None, callback=None):
+        if self.app.demo:
+            if callback:
+                callback()
+            self.refresh_profile()
+            return
+        self.tag_sync_requested = True
+        if wid:
+            self.tag_sync_pending.add(wid)
+        if callback:
+            self.tag_sync_callbacks.append(callback)
+        if self.tag_sync_busy:
+            return
+        self.tag_sync_busy = True
+        self.tag_sync_requested = False
+        pending, self.tag_sync_pending = self.tag_sync_pending, set()
+        callbacks, self.tag_sync_callbacks = self.tag_sync_callbacks, []
+        library, config = self.library, self.config
+        self.sync_label.set_text("正在后台同步标签，仍可继续浏览和标记喜欢…")
+        def work():
+            fetcher = TagFetcher(library, Client())
+            for target in pending:
+                fetcher.get(target)
+            sync_feedback(config, library, fetcher)
+            targets = set(library.feedback(config.favorites_influence)) | pending
+            return fetcher.unavailable or any(library.tags_for(target) is None for target in targets)
+        def done(unavailable, error):
+            self.tag_sync_busy = False
+            self.sync_label.set_text("部分标签尚待同步，反馈已保存，下次更新会继续补全" if unavailable or error else "标签已同步；偏好只保存在本机")
+            self.refresh_profile()
+            for callback in callbacks:
+                callback()
+            if self.tag_sync_requested:
+                self.sync_tags()
+        self.task(work, done)
 
     def preview_cleanup(self):
         candidates = self.library.cleanup_candidates(self.config.keep)
@@ -589,6 +707,16 @@ class PerchWindow(Adw.ApplicationWindow):
         self.dropdown(group, "ratio", "严格宽高比", ["16x9", "16x10", "21x9", "any"],
                       ["16:9", "16:10", "21:9", "不限比例"], self.config.ratio)
         self.spin(group, "max_pages", "每个榜单最多扫描页数", self.config.max_pages, 1, 200)
+        group = self.group(page, "个性化推荐", "喜欢影响推荐但不防清理；收藏保护图片；不喜欢会降低相关标签优先级。")
+        self.switch(group, "personalized", "根据标签个性化推荐", self.config.personalized,
+                    "混合偏好标签与普通发现，保留约四分之一的探索机会")
+        self.switch(group, "favorites_influence", "收藏也参与推荐", self.config.favorites_influence,
+                    "同一张图片同时喜欢和收藏，只计算一次正面反馈")
+        self.profile_label = label("正在读取偏好记录…", "caption", wrap=True)
+        group.add(self.profile_label)
+        group.add(button("同步已有反馈的标签", "view-refresh-symbolic", self.sync_tags))
+        self.sync_label = label("旧图和已删除图片的标签会在同步或下次下载时补全", "caption", wrap=True)
+        group.add(self.sync_label)
         group = self.group(page, "桌面集成", "仅在点击「设为桌面壁纸」时更换桌面背景。")
         self.dropdown(group, "wallpaper_backend", "壁纸后端", ["auto", "dms", "awww", "swww", "gnome", "none"],
                       ["自动检测", "DankMaterialShell", "awww", "swww", "GNOME", "不设置桌面背景"], self.config.wallpaper_backend)
@@ -705,6 +833,7 @@ class PerchWindow(Adw.ApplicationWindow):
                 self.library = library
                 self.toast("设置已保存" if self.app.demo or self.app.config_file else "设置已保存，后台更新计划已生效")
                 self.refresh_library()
+                self.refresh_profile()
                 self.poll()
         self.task(work, done)
 
@@ -765,6 +894,7 @@ class PerchWindow(Adw.ApplicationWindow):
             else:
                 self.toast("更新完成" if code == 0 else "本次更新未完全完成，请查看更新记录")
             self.refresh_library()
+            self.refresh_profile()
         if self.page_name == "activity":
             self.read_logs()
         if not self.status_busy:

@@ -34,8 +34,10 @@ for index, (_, sky, sun, hill) in enumerate(colors):
     path = library.directory / f'wallhaven-demo0{index}.png'
     im.save(path)
     os.utime(path, (1000 + index, 1000 + index))
+    library.save_tags(f'demo0{index}', [{'id': index % 3 + 1, 'name': ['sky', 'forest', 'landscape'][index % 3]}])
 library.set_favorite('demo01', True)
 library.set_favorite('demo04', True)
+library.set_liked('demo02', True)
 config = Config(directory=str(library.directory), keep=6, batch=2)
 save(config, root / 'config.json')
 app = Application(config, library, root / 'config.json', True)
@@ -90,6 +92,16 @@ preview = None
 disliked_id = None
 
 
+def navigate(name):
+    row = app.window.nav.get_first_child()
+    while row:
+        if row.page == name:
+            app.window.nav.select_row(row)
+            return
+        row = row.get_next_sibling()
+    raise AssertionError(f'Navigation not found: {name}')
+
+
 def fake_download(command, **kwargs):
     assert command[3] == 'replace'
     wid = command[command.index('--wallpaper-id') + 1]
@@ -123,13 +135,13 @@ def check():
     elif stage == 1:
         if 'demo08' not in library.favorite_ids() or sum(i.favorite for i in win.items) != 3:
             return True
-        win.nav.select_row(win.nav.get_row_at_index(1))
+        navigate('favorites')
         assert win.page_name == 'favorites'
         stage = 2
     elif stage == 2:
         if not capture('favorites'):
             return True
-        win.nav.select_row(win.nav.get_row_at_index(2))
+        navigate('settings')
         win.controls['active_start'].set_text('08:00')
         win.controls['active_end'].set_text('23:00')
         win.controls['interval_hours'].set_value(4)
@@ -142,12 +154,12 @@ def check():
         assert load(root / 'config.json').slots() == ['08:00', '12:00', '16:00', '20:00']
         if not capture('settings'):
             return True
-        win.nav.select_row(win.nav.get_row_at_index(3))
+        navigate('activity')
         stage = 4
     elif stage == 4:
         if not capture('activity'):
             return True
-        win.nav.select_row(win.nav.get_row_at_index(0))
+        navigate('library')
         win.search.set_text('missing')
         stage = 5
     elif stage == 5:
@@ -213,12 +225,61 @@ def check():
         assert not preview.get_visible()
         assert not any(w.get_visible() and w.get_title() == 'NEXT02 · 栖景' for w in Gtk.Window.list_toplevels())
         stage = 10
+    elif stage == 10:
+        item = next(i for i in win.items if i.wid == 'demo00')
+        win.like_button(item).emit('clicked')
+        stage = 11
+    elif stage == 11:
+        item = next(i for i in win.items if i.wid == 'demo00')
+        if not item.liked:
+            return True
+        assert not item.favorite
+        navigate('likes')
+        assert win.page_name == 'likes'
+        stage = 12
+    elif stage == 12:
+        if not capture('likes'):
+            return True
+        item = next(i for i in win.items if i.wid == 'demo01')
+        win.like_button(item).emit('clicked')
+        stage = 13
+    elif stage == 13:
+        item = next(i for i in win.items if i.wid == 'demo01')
+        if not item.liked:
+            return True
+        assert item.favorite
+        win.like_button(item).emit('clicked')
+        stage = 14
+    elif stage == 14:
+        item = next(i for i in win.items if i.wid == 'demo01')
+        if item.liked:
+            return True
+        assert item.favorite
+        navigate('settings')
+        win.controls['personalized'].set_active(False)
+        win.controls['favorites_influence'].set_active(False)
+        win.save_settings()
+        stage = 15
+    elif stage == 15:
+        saved = load(root / 'config.json')
+        if saved.personalized:
+            return True
+        assert not saved.favorites_influence
+        assert 'sky' in win.profile_label.get_text()
+        scroll = win.stack.get_child_by_name('settings')
+        adjustment = scroll.get_vadjustment()
+        adjustment.set_value(adjustment.get_upper() - adjustment.get_page_size())
+        stage = 16
+    elif stage == 16:
+        if not capture('personalization'):
+            return True
+        stage = 17
     else:
-        print('GUI PASS: gallery, favorite, settings, logs, search, preview, dislike replacement, next preview, failed replacement', flush=True)
+        print('GUI PASS: gallery, favorite, likes, independent feedback, personalization settings, tag profile, logs, search, dislike replacement, next preview, failure recovery', flush=True)
         app.quit()
         return False
     return True
 
 GLib.timeout_add(1200, check)
 app.run([])
-raise SystemExit(1 if errors or stage < 10 else 0)
+raise SystemExit(1 if errors or stage < 17 else 0)

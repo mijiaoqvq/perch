@@ -15,6 +15,7 @@ import warnings
 
 from PIL import Image
 from . import __version__
+from .recommendation import TagFetcher, candidates as recommended_candidates
 
 MAX_BYTES = 100 * 1024 * 1024
 LOG = logging.getLogger("perch")
@@ -127,6 +128,33 @@ class Client:
                 if not result["data"] or page >= int(meta.get("last_page", page)):
                     break
 
+    def tags(self, wid):
+        if not re.fullmatch(r"[a-z0-9]{6}", wid):
+            raise ValueError("无效的壁纸 ID")
+        with tempfile.TemporaryFile() as response:
+            self.fetch(f"https://wallhaven.cc/api/v1/w/{wid}", response, 4 * 1024 * 1024)
+            response.seek(0)
+            result = json.load(response)
+        item = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(item, dict) or item.get("id") != wid or not isinstance(item.get("tags"), list):
+            raise ValueError("Wallhaven 返回了无法识别的标签数据")
+        return item["tags"]
+
+
+def eligible(item, config):
+    wid = item.get("id")
+    if not isinstance(wid, str) or not re.fullmatch(r"[a-z0-9]{6}", wid):
+        return False
+    if item.get("purity") != "sfw" or item.get("category") != "anime":
+        return False
+    try:
+        if not valid_size(int(item.get("dimension_x", 0)), int(item.get("dimension_y", 0)), config):
+            return False
+        parsed = urllib.parse.urlsplit(str(item.get("path", "")))
+        return parsed.scheme == "https" and parsed.hostname == "w.wallhaven.cc" and not parsed.username
+    except (TypeError, ValueError):
+        return False
+
 
 def reconcile(library):
     """Index existing images without deleting them, even after filter changes."""
@@ -159,12 +187,14 @@ def replace_wallpaper(config, library, wid, client=None):
 
 def _run(config, library, client=None, replacement_id=None):
     client = client or Client()
+    fetcher = TagFetcher(library, client)
     # Same run.lock as the legacy worker, preventing overlap during migration.
     if replacement_id:
         LOG.info("准备替换 %s；如有更新任务，将等待其完成", replacement_id)
     with library.locked("run.lock", blocking=bool(replacement_id)):
         if replacement_id:
             library.mark_disliked(replacement_id)
+            fetcher.get(replacement_id)
         for partial in library.directory.glob(".wallhaven-*.part"):
             if partial.is_file() or partial.is_symlink():
                 partial.unlink()
@@ -173,23 +203,9 @@ def _run(config, library, client=None, replacement_id=None):
         required = 1 if replacement_id else max(config.batch, config.keep - before)
         added = failures = 0
         LOG.info("开始更新 · 普通壁纸 %s 张 · 计划新增 %s 张", before, required)
-        for item in client.candidates(config):
-            wid = str(item.get("id", ""))
-            if not re.fullmatch(r"[a-z0-9]{6}", wid):
-                continue
-            if item.get("purity") != "sfw" or item.get("category") != "anime":
-                continue
-            try:
-                if not valid_size(int(item.get("dimension_x", 0)), int(item.get("dimension_y", 0)), config):
-                    continue
-            except (ValueError, TypeError):
-                continue
-            if library.seen(wid=wid):
-                continue
-            url = str(item.get("path", ""))
-            parsed = urllib.parse.urlsplit(url)
-            if parsed.scheme != "https" or parsed.hostname != "w.wallhaven.cc" or parsed.username:
-                continue
+        for item in recommended_candidates(config, library, client, fetcher, eligible):
+            wid = item["id"]
+            url = item["path"]
             temp_path = None
             try:
                 with tempfile.NamedTemporaryFile(dir=library.directory, prefix=".wallhaven-", suffix=".part",
@@ -223,6 +239,7 @@ def _run(config, library, client=None, replacement_id=None):
                     temp_path.unlink(missing_ok=True)
             # Never discard existing wallpapers before the first successful download.
             if added:
+                fetcher.get(wid)
                 if replacement_id:
                     if not library.finish_replacement(destination, replacement_id):
                         raise RuntimeError("原图已收藏或状态发生变化，已保留新图并停止移除原图")

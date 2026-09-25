@@ -50,6 +50,8 @@ class Config:
     ratio: str = "16x9"
     max_pages: int = 100
     wallpaper_backend: str = "auto"
+    personalized: bool = True
+    favorites_influence: bool = True
 
     def validate(self):
         for name, low, high in (("keep", 1, 10000), ("batch", 1, 100),
@@ -64,6 +66,8 @@ class Config:
             raise ValueError("未知的更新时间模式")
         if type(self.enabled) is not bool or type(self.catch_up) is not bool:
             raise ValueError("自动更新和补执行选项必须是布尔值")
+        if type(self.personalized) is not bool or type(self.favorites_influence) is not bool:
+            raise ValueError("个性化推荐选项必须是布尔值")
         minute(self.active_start)
         minute(self.active_end)
         if not isinstance(self.daily_times, list) or not 1 <= len(self.daily_times) <= 24:

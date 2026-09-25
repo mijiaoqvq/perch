@@ -1,4 +1,5 @@
 import io
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -72,7 +73,7 @@ class LibraryTests(TemporaryLibrary):
         self.assertTrue((self.library.directory / 'wallhaven-abcde1.png').is_symlink())
 
     def test_legacy_history_is_reused(self):
-        with sqlite3.connect(self.library.state / 'history.sqlite3') as db:
+        with closing(sqlite3.connect(self.library.state / 'history.sqlite3')) as db, db:
             db.execute('INSERT INTO seen VALUES (?, ?)', ('abcde0', 'old-hash'))
         reopened = Library(self.library.directory, self.library.state)
         self.assertTrue(reopened.seen(wid='abcde0'))
@@ -108,6 +109,9 @@ class FakeClient:
         wid = url.rsplit('/', 1)[1].split('.')[0]
         color = (int(wid[-2:], 36) % 255, 30, 100) if self.color == 'unique' else self.color
         Image.new('RGB', (32, 18), color).save(sink, format='PNG')
+
+    def tags(self, wid):
+        return []
 
 
 class DownloadTests(TemporaryLibrary):

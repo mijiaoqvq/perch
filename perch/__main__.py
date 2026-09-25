@@ -12,7 +12,7 @@ from .library import Library
 
 def main():
     parser = argparse.ArgumentParser(description="栖景 · Perch — Wallhaven 壁纸管理")
-    parser.add_argument("command", nargs="?", choices=("gui", "update", "replace", "cleanup", "schedule"), default="gui")
+    parser.add_argument("command", nargs="?", choices=("gui", "update", "replace", "cleanup", "schedule", "sync-tags"), default="gui")
     parser.add_argument("--wallpaper-id", help="不喜欢并替换指定壁纸（用于 replace）")
     parser.add_argument("--config", type=Path, help="使用独立设置文件")
     parser.add_argument("--state-directory", type=Path, default=state_path())
@@ -55,6 +55,14 @@ def main():
             path = replace_wallpaper(config, library, args.wallpaper_id)
             print(json.dumps({"path": str(path)}, ensure_ascii=False))
             return 0
+        if args.command == "sync-tags":
+            from .downloader import Client
+            from .recommendation import TagFetcher, sync_feedback
+            fetcher = TagFetcher(library, Client())
+            synced = sync_feedback(config, library, fetcher)
+            pending = sum(library.tags_for(wid) is None for wid in library.feedback(config.favorites_influence))
+            print(f"已同步 {synced} 张反馈壁纸的标签；{pending} 张待后续同步")
+            return 1 if fetcher.unavailable else 0
         if args.command == "cleanup":
             candidates = library.cleanup_candidates(config.keep)
             for item in candidates:
