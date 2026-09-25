@@ -153,6 +153,16 @@ class RankingTests(TemporaryLibrary):
         self.image('hates0')
         self.library.mark_disliked('hates0')
         self.library.save_tags('hates0', tags(2))
+        # Previous, now deleted ratings complete the initial calibration period.
+        for index in range(18):
+            wid = f'past{index:02d}'
+            path = self.image(wid)
+            if index % 2:
+                self.library.mark_disliked(wid)
+            else:
+                self.library.set_liked(wid, True)
+            self.library.save_tags(wid, tags(2 if index % 2 else 1))
+            path.unlink()
         return self.library.tag_profile()
 
     def test_preferred_then_unseen_then_negative_tags(self):

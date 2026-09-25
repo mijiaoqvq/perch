@@ -21,56 +21,56 @@ from .config import save
 from . import scheduler
 from .desktop import set_wallpaper
 from .downloader import Client
-from .recommendation import TagFetcher, sync_feedback
+from .recommendation import CALIBRATION_SAMPLES, TagFetcher, learning_model, sync_feedback
 from .widgets import SystemFont, TagChip, tag_cloud
 
 CSS = """
-window { background: #141a1b; color: #e5eae8; }
-headerbar { background: #141a1b; border: none; box-shadow: none; }
-.sidebar { background: #192122; border-right: 1px solid #2a3435; padding: 28px 18px 18px; }
+window { background: @window_bg_color; color: @window_fg_color; }
+headerbar { background: @headerbar_bg_color; color: @headerbar_fg_color; border: none; box-shadow: none; }
+.sidebar { background: @sidebar_bg_color; color: @sidebar_fg_color; border-right: 1px solid alpha(@window_fg_color, 0.08); padding: 28px 18px 18px; }
 .brand { font-size: 1.800em; font-weight: 800; letter-spacing: 3px; }
-.brand-en { color: #8daba6; font-size: 0.733em; letter-spacing: 4px; }
-.brand-mark { color: #9ad4be; font-size: 2.133em; }
+.brand-en { opacity: 0.65; font-size: 0.733em; letter-spacing: 4px; }
+.brand-mark { color: mix(@window_fg_color, @accent_bg_color, 0.6); font-size: 2.133em; }
 .nav { margin-top: 38px; }
 .nav row { padding: 13px 15px; border-radius: 10px; margin-bottom: 6px; }
-.nav row:selected { background: #29413c; color: #b8e4cf; }
-.nav row:hover { background: #263334; }
+.nav row:selected { background: alpha(@accent_bg_color, 0.18); color: @window_fg_color; }
+.nav row:hover { background: alpha(@window_fg_color, 0.07); }
 .nav label { font-weight: 600; }
-.muted { color: #8eaaa5; }
-.caption { font-size: 0.800em; color: #98aaa6; }
+.muted { opacity: 0.65; }
+.caption { font-size: 0.800em; opacity: 0.70; }
 .page { padding: 22px 30px 26px; }
-.eyebrow { color: #9cccb7; font-size: 0.733em; letter-spacing: 2px; font-weight: 700; }
+.eyebrow { color: mix(@window_fg_color, @accent_bg_color, 0.5); font-size: 0.733em; letter-spacing: 2px; font-weight: 700; }
 .page-title { font-size: 2.067em; font-weight: 800; }
-.page-subtitle { color: #94aaa5; margin-top: 7px; }
-.hero { background: linear-gradient(120deg, #263d37, #20302f); border: 1px solid #354b43; border-radius: 16px; padding: 20px 24px; margin: 22px 0 24px; }
-.hero-title { color: #d9eadf; font-size: 1.133em; font-weight: 700; }
-.hero-sub { color: #a1bcb0; font-size: 0.800em; margin-top: 6px; }
-.stat-value { font-size: 1.800em; font-weight: 700; color: #d9eadf; }
-.stat-label { font-size: 0.733em; color: #a1bcb0; }
-button.suggested-action { background: #a2d6be; color: #18392b; font-weight: 700; border-radius: 9px; }
+.page-subtitle { opacity: 0.70; margin-top: 7px; }
+.hero { background: linear-gradient(120deg, mix(@window_bg_color, @accent_bg_color, 0.16), mix(@window_bg_color, @accent_bg_color, 0.05)); border: 1px solid alpha(@accent_bg_color, 0.25); border-radius: 16px; padding: 20px 24px; margin: 22px 0 24px; }
+.hero-title { font-size: 1.133em; font-weight: 700; }
+.hero-sub { opacity: 0.72; font-size: 0.800em; margin-top: 6px; }
+.stat-value { font-size: 1.800em; font-weight: 700; }
+.stat-label { font-size: 0.733em; opacity: 0.70; }
+button.suggested-action { background: @accent_bg_color; color: @accent_fg_color; font-weight: 700; border-radius: 9px; }
 button { border-radius: 8px; }
 .gallery { background: transparent; }
 .gallery > flowboxchild { padding: 0; margin: 0; border-radius: 13px; }
-.card { background: #202a2b; border: 1px solid #303c3d; border-radius: 12px; }
-.card:hover { border-color: #638e7b; }
-.thumbnail { padding: 0; border-radius: 11px 11px 0 0; background: #263232; }
+.card { background: @card_bg_color; color: @card_fg_color; border: 1px solid alpha(@window_fg_color, 0.10); border-radius: 12px; }
+.card:hover { border-color: alpha(@accent_bg_color, 0.65); }
+.thumbnail { padding: 0; border-radius: 11px 11px 0 0; background: @view_bg_color; }
 .card-footer { padding: 12px 13px; }
 .card-id { font-weight: 700; font-size: 0.867em; }
-.favorite { color: #b5dec8; background: #2a4239; }
-.liked { color: #f1b0ba; background: #493139; }
-.pill { background: #263c34; color: #acd2bc; border-radius: 14px; padding: 6px 12px; font-size: 0.733em; }
+.favorite { color: mix(@window_fg_color, @accent_bg_color, 0.5); background: alpha(@accent_bg_color, 0.16); }
+.liked { color: mix(@window_fg_color, @error_bg_color, 0.4); background: alpha(@error_bg_color, 0.12); }
+.pill { background: alpha(@accent_bg_color, 0.12); color: @window_fg_color; border-radius: 14px; padding: 6px 12px; font-size: 0.733em; }
 .footer { padding-top: 16px; }
-.log { font-size: 0.800em; padding: 18px; background: #192122; color: #b6cec4; }
+.log { font-size: 0.800em; padding: 18px; }
+.log, .log text { background: @view_bg_color; color: @view_fg_color; }
 .tag-chip > button { background: transparent; border: none; box-shadow: none; padding: 6px 9px; border-radius: 8px; font-weight: 600; }
-.tag-positive > button { color: #a2d6be; }
-.tag-negative > button { color: #e6a4ad; }
-.tag-neutral > button { color: #9bb6c4; }
-.tag-muted > button { color: #8eaaa5; }
-.tag-chip > button:hover, .tag-chip > button:checked { background: #293c39; }
-.tag-heading { font-size: 0.867em; font-weight: 600; color: #a4b7b0; margin-bottom: 5px; }
-popover > contents { background: #202c2c; color: #e5eae8; }
+.tag-positive > button { color: mix(@window_fg_color, @accent_bg_color, 0.5); }
+.tag-negative > button { color: mix(@window_fg_color, @error_bg_color, 0.4); }
+.tag-neutral > button { color: @window_fg_color; }
+.tag-muted > button { color: alpha(@window_fg_color, 0.65); }
+.tag-chip > button:hover, .tag-chip > button:checked { background: alpha(@accent_bg_color, 0.14); }
+.tag-heading { font-size: 0.867em; font-weight: 600; opacity: 0.75; margin-bottom: 5px; }
+popover > contents, popover > arrow { background: @popover_bg_color; color: @popover_fg_color; }
 .settings-group { margin-bottom: 20px; }
-preferencesgroup > box > label { color: #bbd5c7; }
 .empty { padding: 70px 20px; }
 """
 
@@ -126,7 +126,7 @@ class Application(Adw.Application):
 
     def do_activate(self):
         if not self.window:
-            Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+            Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.DEFAULT)
             css = Gtk.CssProvider()
             css.load_from_data(CSS.encode())
             Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -145,6 +145,7 @@ class PerchWindow(Adw.ApplicationWindow):
         self.page_name = "library"
         self.likes_view = "tags"
         self.profile_generation = 0
+        self.learning_samples = 0
         self.tag_edit_busy = False
         self.active_tag_chip = None
         self.spec_window = None
@@ -472,7 +473,7 @@ class PerchWindow(Adw.ApplicationWindow):
                     widgets['remove'] = remove
                 cloud.append(chip)
                 self.tag_widgets[tag['key']] = widgets
-        if not self.tag_widgets:
+        if not self.tag_widgets and self.learning_samples >= CALIBRATION_SAMPLES:
             self.tag_rows.append(label("还没有推荐标签。可以手动添加，或喜欢几张壁纸后同步标签。", "caption", wrap=True))
         specs = [tag['name'] for tag in profile if tag['technical']]
         self.neutral_label.set_text("规格名单中的标签不参与推荐评分。" + ("\n当前反馈中：" + "、".join(specs) if specs else ""))
@@ -829,17 +830,28 @@ class PerchWindow(Adw.ApplicationWindow):
         def work():
             feedback = library.feedback(config.favorites_influence)
             pending = sum(library.tags_for(wid) is None for wid in feedback)
-            return feedback, pending, library.tag_profile(config.favorites_influence, include_specs=True)
+            samples, profile = learning_model(library, config.favorites_influence, include_specs=True)
+            return feedback, pending, samples, profile
         def done(result, error):
             if error or library is not self.library or generation != self.profile_generation:
                 return
-            feedback, pending, profile = result
-            self.profile_status.set_text("个性化已开启 · 手动调整与自动学习共同影响推荐" if self.config.personalized else
-                                         "个性化已关闭 · 标签调整仍会保存，在「偏好设置」开启后生效")
-            self.profile_label.set_text(
-                f"已记录 {sum(v > 0 for v in feedback.values())} 张正面反馈、"
-                f"{sum(v < 0 for v in feedback.values())} 张不喜欢 · {pending} 张待同步标签"
-            )
+            feedback, pending, samples, profile = result
+            self.learning_samples = samples
+            if not self.config.personalized:
+                status = "个性化已关闭 · 标签调整仍会保存，在「偏好设置」开启后生效"
+            elif samples < CALIBRATION_SAMPLES:
+                status = "自动校准中"
+            else:
+                status = "个性化已开启 · 手动调整与自动学习共同影响推荐"
+            self.profile_status.set_text(status)
+            if samples < CALIBRATION_SAMPLES:
+                manual = "手动标签照常生效" if self.config.personalized else "手动标签已保存，开启个性化后生效"
+                summary = (f"{samples} / {CALIBRATION_SAMPLES} 张有效反馈 · 继续标记喜欢或不喜欢，自动偏好在校准后启用。\n"
+                           f"{manual} · {pending} 张待同步标签")
+            else:
+                summary = (f"已记录 {sum(v > 0 for v in feedback.values())} 张正面反馈、"
+                           f"{sum(v < 0 for v in feedback.values())} 张不喜欢 · {pending} 张待同步标签")
+            self.profile_label.set_text(summary)
             self.render_tag_rows(profile)
         self.task(work, done)
 
@@ -981,7 +993,7 @@ class PerchWindow(Adw.ApplicationWindow):
         self.spin(group, "max_pages", "每个榜单最多扫描页数", self.config.max_pages, 1, 200)
         group = self.group(page, "个性化推荐", "喜欢影响推荐但不防清理；收藏保护图片；不喜欢会降低相关标签优先级。")
         self.switch(group, "personalized", "根据标签个性化推荐", self.config.personalized,
-                    "混合偏好标签与普通发现，保留约四分之一的探索机会")
+                    f"先自动校准 {CALIBRATION_SAMPLES} 张有效反馈，再启用自动偏好；手动标签可提前生效")
         self.switch(group, "favorites_influence", "收藏也参与推荐", self.config.favorites_influence,
                     "同一张图片同时喜欢和收藏，只计算一次正面反馈")
         group.add(button("在「我喜欢的」管理推荐标签", "emblem-favorite-symbolic", self.show_tag_manager))

@@ -9,6 +9,19 @@ from .tag_policy import is_spec_tag, tag_key
 LOG = logging.getLogger('perch')
 POOL_SIZE = 12
 FEEDBACK_SYNC_LIMIT = 24
+CALIBRATION_SAMPLES = 20
+MIN_TAG_SAMPLES = 3
+
+
+def learning_model(library, include_favorites=True, spec_policy=None, include_specs=False):
+    """Withhold automatic inferences until enough independent feedback is available."""
+    policy = spec_policy if spec_policy is not None else library.spec_policy()
+    samples = library.learning_sample_count(include_favorites, policy)
+    ready = samples >= CALIBRATION_SAMPLES
+    raw = library.tag_profile(include_favorites, include_specs, policy)
+    profile = [tag for tag in raw if tag['mode'] != 'auto' or tag['technical']
+               or (ready and tag['positive'] + tag['negative'] >= MIN_TAG_SAMPLES)]
+    return samples, profile
 
 
 class TagFetcher:
@@ -101,7 +114,10 @@ def candidates(config, library, client, fetcher, eligible):
     policy = library.spec_policy()
     if config.personalized:
         sync_feedback(config, library, fetcher)
-        profile = library.tag_profile(config.favorites_influence, spec_policy=policy)
+        samples, profile = learning_model(library, config.favorites_influence, policy)
+        if samples < CALIBRATION_SAMPLES:
+            LOG.info('自动校准中 · 已收集 %s / %s 张有效反馈；自动标签偏好暂不参与推荐',
+                     samples, CALIBRATION_SAMPLES)
     streams = [client.candidates(config)]
     # Wallhaven exact-tag searches cannot be combined with a user's query.
     # Keep explicit queries intact and only rerank their results.

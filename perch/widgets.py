@@ -1,10 +1,14 @@
 """Small GTK widgets shared by the tag editor and its settings list."""
 import json
+import os
+from pathlib import Path
 
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+
+from .appearance import desktop_font_family
 
 
 def tag_cloud():
@@ -17,23 +21,58 @@ def tag_cloud():
 
 
 class SystemFont:
-    """Use the desktop's GTK font, including changes while the app is open."""
-    def __init__(self):
+    """Follow DMS's desktop font on DMS sessions, otherwise the GTK font."""
+    def __init__(self, config_dir=None, desktop=None):
+        self.config_dir = Path(config_dir or os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        self.desktop = desktop
+        self.update_timer = 0
+        self.monitors = []
         self.settings = Gtk.Settings.get_default()
         self.provider = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), self.provider,
                                                   Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
-        self.settings.connect("notify::gtk-font-name", self.update)
+        self.settings_handler = self.settings.connect("notify::gtk-font-name", self.update)
+        for directory in (self.config_dir, self.config_dir / "DankMaterialShell"):
+            if directory.is_dir():
+                try:
+                    monitor = Gio.File.new_for_path(str(directory)).monitor_directory(Gio.FileMonitorFlags.NONE, None)
+                    monitor.connect("changed", self.desktop_changed)
+                    self.monitors.append(monitor)
+                except GLib.Error:
+                    pass
         self.update()
 
+    def desktop_changed(self, *_):
+        if self.update_timer:
+            GLib.source_remove(self.update_timer)
+        self.update_timer = GLib.timeout_add(150, self.update)
+
     def update(self, *_):
+        if self.update_timer:
+            GLib.source_remove(self.update_timer)
+        self.update_timer = 0
         description = Pango.FontDescription.from_string(self.settings.get_property("gtk-font-name"))
+        desktop_family = desktop_font_family(self.config_dir, self.desktop)
+        if desktop_family:
+            description.set_family(desktop_family)
+        self.family = description.get_family()
+        self.source = "DMS 桌面字体" if desktop_family else "GTK 系统字体"
         families = ", ".join(json.dumps(name.strip(), ensure_ascii=False)
                              for name in description.get_family().split(","))
         size = description.get_size() / Pango.SCALE
         unit = "px" if description.get_size_is_absolute() else "pt"
         self.provider.load_from_data((f"* {{ font-family: {families}; }}\n"
                                       f"window, popover {{ font-size: {size:g}{unit}; }}").encode())
+        return GLib.SOURCE_REMOVE
+
+    def close(self):
+        if self.update_timer:
+            GLib.source_remove(self.update_timer)
+            self.update_timer = 0
+        for monitor in self.monitors:
+            monitor.cancel()
+        self.settings.disconnect(self.settings_handler)
+        Gtk.StyleContext.remove_provider_for_display(Gdk.Display.get_default(), self.provider)
 
 
 class TagChip(Gtk.MenuButton):

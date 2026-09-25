@@ -14,7 +14,8 @@ from PIL import Image, ImageDraw
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from perch.config import Config, save, load
 from perch.library import Library
-from perch.gui import Application, GLib, Gtk
+from perch.gui import Application, Adw, Gdk, GLib, Gtk
+from perch.widgets import SystemFont
 from perch.downloader import replace_wallpaper
 from test_core import FakeClient
 
@@ -129,6 +130,17 @@ def check():
     if stage == 0:
         assert len(win.items) == 9
         assert win.gallery_hero.get_visible()
+        iterator = win.gallery_title.get_layout().get_iter()
+        glyph_fonts = set()
+        while True:
+            run = iterator.get_run_readonly()
+            if run:
+                glyph_fonts.add(run.item.analysis.font.describe().get_family())
+            if not iterator.next_run():
+                break
+        print('RENDERED FONTS', app.system_font.source, app.system_font.family, sorted(glyph_fonts), flush=True)
+        if app.system_font.family == 'Maple Mono NF CN':
+            assert glyph_fonts == {'Maple Mono NF CN'}, 'Chinese glyphs must not silently fall back'
         assert sum(i.favorite for i in win.items) == 2
         if not capture('gallery'):
             return True
@@ -241,6 +253,20 @@ def check():
         assert win.page_name == 'likes'
         assert not win.gallery_hero.get_visible()
         assert win.gallery_stack.get_visible_child_name() == 'tags'
+        stage = 11.1
+    elif stage == 11.1:
+        if win.profile_status.get_text() != '自动校准中':
+            return True
+        assert not win.tag_widgets, 'Do not show inferred positive or negative tags during calibration'
+        if not capture('calibration'):
+            return True
+        # Historical ratings let the remaining integration checks use a mature profile.
+        for index in range(36):
+            wid = f'old{index:03d}'
+            with library.connect() as db:
+                db.execute('INSERT INTO likes(id) VALUES (?)', (wid,))
+            library.save_tags(wid, [{'id': index % 3 + 1, 'name': ['sky', 'forest', 'landscape'][index % 3]}])
+        win.refresh_profile()
         win.likes_tab_buttons['images'].emit('clicked')
         assert win.gallery_stack.get_visible_child_name() == 'images'
         assert not win.gallery_hero.get_visible()
@@ -394,6 +420,8 @@ def check():
         win.spec_window.close()
         # Local Gtk.Settings changes affect only this isolated test application.
         win.original_test_font = Gtk.Settings.get_default().get_property('gtk-font-name')
+        app.system_font.close()
+        app.system_font = SystemFont(root / 'font-config', 'GNOME')
         Gtk.Settings.get_default().set_property('gtk-font-name', 'Serif 13')
         stage = 33
     elif stage == 33:
@@ -408,12 +436,46 @@ def check():
         assert not win.tag_widgets['sky']['chip'].popover.get_visible()
         assert win.gallery_hero.get_visible()
         stage = 35
+    elif stage == 35:
+        app.system_font.close()
+        win.font_fixture = root / 'font-config/DankMaterialShell/settings.json'
+        win.font_fixture.parent.mkdir(parents=True)
+        win.font_fixture.write_text('{"fontFamily": "Maple Mono NF CN"}')
+        app.system_font = SystemFont(root / 'font-config', 'niri')
+        stage = 36
+    elif stage == 36:
+        assert win.gallery_title.get_pango_context().get_font_description().get_family() == 'Maple Mono NF CN'
+        replacement = win.font_fixture.with_suffix('.tmp')
+        replacement.write_text('{"fontFamily": "Serif"}')
+        replacement.replace(win.font_fixture)
+        stage = 37
+    elif stage == 37:
+        assert win.gallery_title.get_pango_context().get_font_description().get_family() == 'Serif'
+        app.system_font.close()
+        app.system_font = SystemFont()
+        # Simulate a light GTK palette locally; do not change the user's GTK files.
+        win.light_test_css = Gtk.CssProvider()
+        colors = {'window_bg_color':'#fafafa','window_fg_color':'#202020','view_bg_color':'#ffffff',
+                  'view_fg_color':'#202020','headerbar_bg_color':'#f5f5f5','headerbar_fg_color':'#202020',
+                  'sidebar_bg_color':'#eeeeee','sidebar_fg_color':'#202020','card_bg_color':'#ffffff',
+                  'card_fg_color':'#202020','accent_bg_color':'#3584e4','accent_fg_color':'#ffffff',
+                  'popover_bg_color':'#ffffff','popover_fg_color':'#202020','error_bg_color':'#c01c28'}
+        win.light_test_css.load_from_data('\n'.join(f'@define-color {name} {color};' for name,color in colors.items()).encode())
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), win.light_test_css, Gtk.STYLE_PROVIDER_PRIORITY_USER + 1)
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+        stage = 38
+    elif stage == 38:
+        if not capture('light-theme'):
+            return True
+        Gtk.StyleContext.remove_provider_for_display(Gdk.Display.get_default(), win.light_test_css)
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.DEFAULT)
+        stage = 39
     else:
-        print('GUI PASS: gallery-only summary, hashtag hover/click cards, manual preferences, editable spec list, live system font, favorite/like protection, replacement and recovery', flush=True)
+        print('GUI PASS: real glyph font, live DMS and GTK fonts, GTK palettes, calibration, hashtag controls, specs, favorite/like protection, replacement and recovery', flush=True)
         app.quit()
         return False
     return True
 
 GLib.timeout_add(1200, check)
 app.run([])
-raise SystemExit(1 if errors or stage < 35 else 0)
+raise SystemExit(1 if errors or stage < 39 else 0)

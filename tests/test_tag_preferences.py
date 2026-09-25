@@ -188,6 +188,7 @@ class TagPreferenceTests(TemporaryLibrary):
         self.assertEqual([tag['name'] for tag in profile], ['sky'])
         more = tags(1, 2) + [{'id': 17, 'name': 'custom display spec'}]
         self.assertEqual(score_tags(more, profile, policy), score_tags(tags(1), profile, policy))
+        self.library.set_tag_override('sky', 'prefer')
         _, client = self.discover()
         self.assertEqual(client.queries, ['', 'id:1'])
         with self.assertRaisesRegex(ValueError, '始终保持中立'):

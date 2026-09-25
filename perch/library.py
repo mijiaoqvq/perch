@@ -207,6 +207,17 @@ class Library:
             db.execute("INSERT INTO spec_tag_overrides VALUES (?, ?, ?) ON CONFLICT(name) "
                        "DO UPDATE SET label=excluded.label, enabled=excluded.enabled", (key, name.strip(), enabled))
 
+    def learning_sample_count(self, include_favorites=True, spec_policy=None):
+        """Distinct rated images with at least one usable content tag, even if deleted."""
+        policy = spec_policy if spec_policy is not None else self.spec_policy()
+        feedback = self.feedback(include_favorites)
+        with self.connect() as db:
+            ignored = {row[0] for row in db.execute("SELECT name FROM tag_overrides WHERE mode='ignore'")}
+            samples = {wid for wid, name in db.execute(
+                "SELECT wallpaper_id, name FROM wallpaper_tags JOIN tags ON tag_id=tags.id")
+                if wid in feedback and tag_key(name) not in ignored and not policy(name)}
+        return len(samples)
+
     def tag_profile(self, include_favorites=True, include_specs=False, spec_policy=None):
         policy = spec_policy if spec_policy is not None else self.spec_policy()
         feedback = self.feedback(include_favorites)
