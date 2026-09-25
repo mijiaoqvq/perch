@@ -22,30 +22,31 @@ from . import scheduler
 from .desktop import set_wallpaper
 from .downloader import Client
 from .recommendation import TagFetcher, sync_feedback
+from .widgets import SystemFont, TagChip, tag_cloud
 
 CSS = """
 window { background: #141a1b; color: #e5eae8; }
 headerbar { background: #141a1b; border: none; box-shadow: none; }
 .sidebar { background: #192122; border-right: 1px solid #2a3435; padding: 28px 18px 18px; }
-.brand { font-size: 27px; font-weight: 800; letter-spacing: 3px; }
-.brand-en { color: #8daba6; font-size: 11px; letter-spacing: 4px; }
-.brand-mark { color: #9ad4be; font-size: 32px; }
+.brand { font-size: 1.800em; font-weight: 800; letter-spacing: 3px; }
+.brand-en { color: #8daba6; font-size: 0.733em; letter-spacing: 4px; }
+.brand-mark { color: #9ad4be; font-size: 2.133em; }
 .nav { margin-top: 38px; }
 .nav row { padding: 13px 15px; border-radius: 10px; margin-bottom: 6px; }
 .nav row:selected { background: #29413c; color: #b8e4cf; }
 .nav row:hover { background: #263334; }
 .nav label { font-weight: 600; }
 .muted { color: #8eaaa5; }
-.caption { font-size: 12px; color: #98aaa6; }
+.caption { font-size: 0.800em; color: #98aaa6; }
 .page { padding: 22px 30px 26px; }
-.eyebrow { color: #9cccb7; font-size: 11px; letter-spacing: 2px; font-weight: 700; }
-.page-title { font-size: 31px; font-weight: 800; }
+.eyebrow { color: #9cccb7; font-size: 0.733em; letter-spacing: 2px; font-weight: 700; }
+.page-title { font-size: 2.067em; font-weight: 800; }
 .page-subtitle { color: #94aaa5; margin-top: 7px; }
 .hero { background: linear-gradient(120deg, #263d37, #20302f); border: 1px solid #354b43; border-radius: 16px; padding: 20px 24px; margin: 22px 0 24px; }
-.hero-title { color: #d9eadf; font-size: 17px; font-weight: 700; }
-.hero-sub { color: #a1bcb0; font-size: 12px; margin-top: 6px; }
-.stat-value { font-size: 27px; font-weight: 700; color: #d9eadf; }
-.stat-label { font-size: 11px; color: #a1bcb0; }
+.hero-title { color: #d9eadf; font-size: 1.133em; font-weight: 700; }
+.hero-sub { color: #a1bcb0; font-size: 0.800em; margin-top: 6px; }
+.stat-value { font-size: 1.800em; font-weight: 700; color: #d9eadf; }
+.stat-label { font-size: 0.733em; color: #a1bcb0; }
 button.suggested-action { background: #a2d6be; color: #18392b; font-weight: 700; border-radius: 9px; }
 button { border-radius: 8px; }
 .gallery { background: transparent; }
@@ -54,12 +55,20 @@ button { border-radius: 8px; }
 .card:hover { border-color: #638e7b; }
 .thumbnail { padding: 0; border-radius: 11px 11px 0 0; background: #263232; }
 .card-footer { padding: 12px 13px; }
-.card-id { font-weight: 700; font-size: 13px; }
+.card-id { font-weight: 700; font-size: 0.867em; }
 .favorite { color: #b5dec8; background: #2a4239; }
 .liked { color: #f1b0ba; background: #493139; }
-.pill { background: #263c34; color: #acd2bc; border-radius: 14px; padding: 6px 12px; font-size: 11px; }
+.pill { background: #263c34; color: #acd2bc; border-radius: 14px; padding: 6px 12px; font-size: 0.733em; }
 .footer { padding-top: 16px; }
-.log { font-family: monospace; font-size: 12px; padding: 18px; background: #192122; color: #b6cec4; }
+.log { font-size: 0.800em; padding: 18px; background: #192122; color: #b6cec4; }
+.tag-chip > button { background: transparent; border: none; box-shadow: none; padding: 6px 9px; border-radius: 8px; font-weight: 600; }
+.tag-positive > button { color: #a2d6be; }
+.tag-negative > button { color: #e6a4ad; }
+.tag-neutral > button { color: #9bb6c4; }
+.tag-muted > button { color: #8eaaa5; }
+.tag-chip > button:hover, .tag-chip > button:checked { background: #293c39; }
+.tag-heading { font-size: 0.867em; font-weight: 600; color: #a4b7b0; margin-bottom: 5px; }
+popover > contents { background: #202c2c; color: #e5eae8; }
 .settings-group { margin-bottom: 20px; }
 preferencesgroup > box > label { color: #bbd5c7; }
 .empty { padding: 70px 20px; }
@@ -121,6 +130,7 @@ class Application(Adw.Application):
             css = Gtk.CssProvider()
             css.load_from_data(CSS.encode())
             Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            self.system_font = SystemFont()
             self.window = PerchWindow(self)
         self.window.present()
 
@@ -136,6 +146,10 @@ class PerchWindow(Adw.ApplicationWindow):
         self.likes_view = "tags"
         self.profile_generation = 0
         self.tag_edit_busy = False
+        self.active_tag_chip = None
+        self.spec_window = None
+        self.spec_busy = False
+        self.spec_generation = 0
         self.process = None
         self.job_kind = None
         self.job_output = None
@@ -233,7 +247,10 @@ class PerchWindow(Adw.ApplicationWindow):
     def navigate(self, _, row):
         if row is None:
             return
+        if self.active_tag_chip:
+            self.active_tag_chip.close_details()
         self.page_name = row.page
+        self.gallery_hero.set_visible(row.page == "library")
         if row.page in ("library", "favorites", "likes"):
             self.stack.set_visible_child_name("gallery")
             self.gallery_title.set_text({"favorites": "我的收藏", "likes": "我喜欢的"}.get(row.page, "让桌面，常有新风景。"))
@@ -328,6 +345,8 @@ class PerchWindow(Adw.ApplicationWindow):
         page.append(footer)
 
     def set_likes_view(self, view):
+        if self.active_tag_chip:
+            self.active_tag_chip.close_details()
         self.likes_view = view
         tab = self.likes_tab_buttons[view]
         if not tab.get_active():
@@ -368,13 +387,14 @@ class PerchWindow(Adw.ApplicationWindow):
         self.tag_add_button = button("添加标签", "list-add-symbolic", self.add_tag_override, "suggested-action")
         add.append(self.tag_add_button)
         self.tag_editor.append(add)
-        self.tag_editor.append(label("手动设置优先于自动学习，立即保存并影响后续下载。移除标签后，它将不再影响推荐。", "caption", wrap=True))
+        self.tag_editor.append(label("悬停或点击标签，查看反馈和调整偏好。手动调整立即保存。", "caption", wrap=True))
         self.tag_rows = box(spacing=16)
         self.tag_editor.append(self.tag_rows)
-        neutral = Adw.PreferencesGroup(title="规格标签 · 始终中立",
-                                      description="4K、分辨率、画幅比例等不参与推荐加分或减分。尺寸要求仍由偏好设置单独控制。")
+        neutral = box(Gtk.Orientation.HORIZONTAL, 12)
         self.neutral_label = label("", "caption", wrap=True)
-        neutral.add(self.neutral_label)
+        self.neutral_label.set_hexpand(True)
+        neutral.append(self.neutral_label)
+        neutral.append(button("设置规格名单", "emblem-system-symbolic", self.show_spec_settings))
         page.append(neutral)
         sync = box(Gtk.Orientation.HORIZONTAL, 12)
         sync.append(button("同步已有反馈的标签", "view-refresh-symbolic", self.sync_tags))
@@ -393,6 +413,7 @@ class PerchWindow(Adw.ApplicationWindow):
             return
         self.tag_edit_busy = True
         self.profile_generation += 1
+        self.set_focus(None)
         self.tag_editor.set_sensitive(False)
         library = self.library
         def done(_, error):
@@ -401,58 +422,151 @@ class PerchWindow(Adw.ApplicationWindow):
             if not error:
                 if clear_entry and self.tag_entry.get_text() == name:
                     self.tag_entry.set_text("")
+                    self.tag_entry.grab_focus()
                 self.toast({None: "已恢复自动学习", "prefer": "已设为更多推荐", "avoid": "已设为减少推荐",
                             "ignore": "已移除标签；后续学习不会自动加回，可随时恢复"}[mode])
             self.refresh_profile()
         self.task(lambda: library.set_tag_override(name, mode), done)
 
     def render_tag_rows(self, profile):
+        if self.active_tag_chip:
+            self.active_tag_chip.close_details()
         child = self.tag_rows.get_first_child()
         while child:
             self.tag_rows.remove(child)
             child = self.tag_rows.get_first_child()
         self.tag_widgets = {}
-        active = [tag for tag in profile if not tag['ignored']]
-        ignored = [tag for tag in profile if tag['mode'] == 'ignore' and not tag['technical']]
-        group = Adw.PreferencesGroup(title=f"推荐标签 · {len(active)}",
-                                    description="自动学习会随反馈变化；手动调整会一直保留。减少推荐会降低优先级，不会完全屏蔽。")
-        self.tag_rows.append(group)
-        if not active:
-            group.add(label("还没有推荐标签。可以手动添加，或喜欢几张壁纸后同步标签。", "caption", wrap=True))
-        for tag in active:
-            direction = "更多推荐" if tag['weight'] > 0 else "减少推荐" if tag['weight'] < 0 else "暂时中立"
-            row = Adw.ActionRow(title=tag['name'], subtitle=f"{direction} · {tag['positive']} 次正面反馈 / {tag['negative']} 次不喜欢")
-            row.set_use_markup(False)
-            row.set_title_lines(1)
-            row.set_subtitle_lines(2)
-            select = Gtk.DropDown.new_from_strings(["自动学习", "更多推荐", "减少推荐"])
-            modes = [None, "prefer", "avoid"]
-            select.set_selected(modes.index(None if tag['mode'] == 'auto' else tag['mode']))
-            select.set_valign(Gtk.Align.CENTER)
-            select.set_tooltip_text("选择自动学习，或用手动偏好覆盖学习结果")
-            select.connect("notify::selected", lambda widget, _, name=tag['name']: self.change_tag_override(name, modes[widget.get_selected()]))
-            row.add_suffix(select)
-            remove = button(icon="list-remove-symbolic", action=lambda name=tag['name']: self.change_tag_override(name, "ignore"),
-                            tooltip="移除这个标签，不再用它影响推荐（可恢复）")
-            remove.set_valign(Gtk.Align.CENTER)
-            row.add_suffix(remove)
-            group.add(row)
-            self.tag_widgets[tag['key']] = dict(row=row, select=select, remove=remove)
-        if ignored:
-            group = Adw.PreferencesGroup()
-            expander = Adw.ExpanderRow(title=f"已移除的标签 · {len(ignored)}", subtitle="不参与加分或减分，不会被自动学习加回")
-            group.add(expander)
+        groups = (("更多推荐", "positive", lambda t: not t['ignored'] and t['weight'] > 0),
+                  ("减少推荐", "negative", lambda t: not t['ignored'] and t['weight'] < 0),
+                  ("暂时中立", "neutral", lambda t: not t['ignored'] and t['weight'] == 0),
+                  ("已移除", "muted", lambda t: t['mode'] == 'ignore' and not t['technical']))
+        for title, tone, condition in groups:
+            tags = [tag for tag in profile if condition(tag)]
+            if not tags:
+                continue
+            group = box(spacing=4)
+            group.append(label(f"{title} · {len(tags)}", "tag-heading"))
+            cloud = tag_cloud()
+            group.append(cloud)
             self.tag_rows.append(group)
-            for tag in ignored:
-                row = Adw.ActionRow(title=tag['name'])
-                row.set_use_markup(False)
-                restore = button("恢复自动学习", action=lambda name=tag['name']: self.change_tag_override(name, None))
-                restore.set_valign(Gtk.Align.CENTER)
-                row.add_suffix(restore)
-                expander.add_row(row)
-                self.tag_widgets[tag['key']] = dict(row=row, restore=restore, expander=expander)
+            for tag in tags:
+                chip = TagChip(self, tag['name'], tone)
+                chip.panel.append(label(tag['name'], "heading", wrap=True))
+                origin = "自动学习" if tag['mode'] == 'auto' else "手动设置"
+                chip.panel.append(label(f"{title} · {origin}\n{tag['positive']} 次正面反馈 · {tag['negative']} 次不喜欢", "caption"))
+                widgets = dict(chip=chip)
+                if tone == "muted":
+                    chip.panel.append(label("不参与评分，也不会被自动加回。", "caption", wrap=True))
+                    restore = button("恢复自动学习", action=lambda name=tag['name']: self.change_tag_override(name, None))
+                    chip.panel.append(restore)
+                    widgets['restore'] = restore
+                else:
+                    for mode, caption in (("prefer", "更多推荐"), ("avoid", "减少推荐"), (None, "自动学习")):
+                        action = button(caption, action=lambda name=tag['name'], mode=mode: self.change_tag_override(name, mode),
+                                        css="suggested-action" if mode == (None if tag['mode'] == 'auto' else tag['mode']) else None)
+                        chip.panel.append(action)
+                        widgets[mode or 'auto'] = action
+                    remove = button("移除标签", "list-remove-symbolic", lambda name=tag['name']: self.change_tag_override(name, "ignore"))
+                    chip.panel.append(remove)
+                    chip.panel.append(label("减少推荐会降低优先级；移除则保持中立。", "caption", wrap=True))
+                    widgets['remove'] = remove
+                cloud.append(chip)
+                self.tag_widgets[tag['key']] = widgets
+        if not self.tag_widgets:
+            self.tag_rows.append(label("还没有推荐标签。可以手动添加，或喜欢几张壁纸后同步标签。", "caption", wrap=True))
         specs = [tag['name'] for tag in profile if tag['technical']]
-        self.neutral_label.set_text("已忽略规格标签：" + "、".join(specs) if specs else "例如：4K、8K、Ultra HD、3840×2160、16:9")
+        self.neutral_label.set_text("规格名单中的标签不参与推荐评分。" + ("\n当前反馈中：" + "、".join(specs) if specs else ""))
+
+    def show_spec_settings(self):
+        if self.spec_window:
+            self.spec_window.present()
+            return
+        win = Gtk.Window(title="规格标签名单 · 栖景", transient_for=self, modal=True,
+                         default_width=700, default_height=560)
+        win.set_titlebar(Gtk.HeaderBar())
+        self.spec_window = win
+        def closed(*_):
+            if self.active_tag_chip:
+                self.active_tag_chip.close_details()
+            self.spec_window = None
+            self.spec_generation += 1
+            return False
+        win.connect("close-request", closed)
+        page = box(spacing=16, css="page")
+        page.append(label("规格标签中立名单", "title-2"))
+        page.append(label("名单内的标签不加分、不减分，也不用于偏好搜索。增删立即保存，尺寸筛选仍单独生效。", "caption", wrap=True))
+        self.spec_editor = box(spacing=14)
+        page.append(self.spec_editor)
+        add = box(Gtk.Orientation.HORIZONTAL, 10)
+        self.spec_entry = Gtk.Entry(placeholder_text="加入中立名单，例如 HDR", hexpand=True, max_length=200)
+        self.spec_entry.connect("activate", lambda *_: self.change_spec_tag(self.spec_entry.get_text(), True))
+        self.spec_add_button = button("加入名单", "list-add-symbolic",
+                                      lambda: self.change_spec_tag(self.spec_entry.get_text(), True), "suggested-action")
+        add.append(self.spec_entry)
+        add.append(self.spec_add_button)
+        self.spec_editor.append(add)
+        self.spec_message = label("", "caption", wrap=True)
+        self.spec_editor.append(self.spec_message)
+        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        self.spec_list = box(spacing=12)
+        scroll.set_child(self.spec_list)
+        self.spec_editor.append(scroll)
+        self.spec_editor.set_vexpand(True)
+        page.append(label("悬停或点击标签可移出名单。默认识别常见规格、像素尺寸和比例；移出后，这个名称不会被自动加回。", "caption", wrap=True))
+        win.set_child(page)
+        win.present()
+        self.refresh_spec_list()
+
+    def refresh_spec_list(self):
+        if not self.spec_window or self.spec_busy:
+            return
+        self.spec_generation += 1
+        generation = self.spec_generation
+        def done(entries, error):
+            if error or not self.spec_window or generation != self.spec_generation:
+                return
+            if self.active_tag_chip:
+                self.active_tag_chip.close_details()
+            child = self.spec_list.get_first_child()
+            while child:
+                self.spec_list.remove(child)
+                child = self.spec_list.get_first_child()
+            self.spec_widgets = {}
+            self.spec_list.append(label(f"{len(entries)} 个中立标签", "tag-heading"))
+            cloud = tag_cloud()
+            self.spec_list.append(cloud)
+            for entry in entries:
+                chip = TagChip(self, entry['name'])
+                chip.panel.append(label(entry['name'], "heading", wrap=True))
+                chip.panel.append(label(f"{entry['source']} · 保持中立", "caption"))
+                chip.panel.append(label("移出后将恢复已有的自动学习或手动偏好。", "caption", wrap=True))
+                remove = button("移出中立名单", "list-remove-symbolic",
+                                lambda name=entry['name']: self.change_spec_tag(name, False))
+                chip.panel.append(remove)
+                cloud.append(chip)
+                self.spec_widgets[entry['key']] = dict(chip=chip, remove=remove)
+        self.task(self.library.spec_entries, done)
+
+    def change_spec_tag(self, name, enabled):
+        if self.spec_busy:
+            return
+        self.spec_busy = True
+        self.spec_generation += 1
+        window = self.spec_window
+        if window:
+            window.set_focus(None)
+            self.spec_editor.set_sensitive(False)
+        def done(_, error):
+            self.spec_busy = False
+            if window is self.spec_window and window:
+                self.spec_editor.set_sensitive(True)
+                self.spec_message.set_text(error or ("已加入中立名单" if enabled else "已移出名单，恢复原有偏好"))
+                if not error and enabled and self.spec_entry.get_text() == name:
+                    self.spec_entry.set_text("")
+                    self.spec_entry.grab_focus()
+            self.refresh_spec_list()
+            self.refresh_profile()
+        self.task(lambda: self.library.set_spec_tag(name, enabled), done)
 
     def stat(self, parent, caption):
         group = box(spacing=3)
@@ -528,7 +642,8 @@ class PerchWindow(Adw.ApplicationWindow):
         tags_view = self.page_name == "likes" and self.likes_view == "tags"
         self.likes_tabs.set_visible(self.page_name == "likes")
         self.library_toolbar.set_visible(not tags_view)
-        self.gallery_hero.set_visible(not tags_view)
+        self.gallery_hero.set_visible(self.page_name == "library")
+        self.library_toolbar.set_margin_top(22 if self.page_name == "favorites" else 0)
         if tags_view:
             self.count_label.set_text("偏好保存在本机 · 标签调整不会更改壁纸的喜欢或收藏状态")
             self.gallery_stack.set_visible_child_name("tags")
@@ -721,13 +836,9 @@ class PerchWindow(Adw.ApplicationWindow):
             feedback, pending, profile = result
             self.profile_status.set_text("个性化已开启 · 手动调整与自动学习共同影响推荐" if self.config.personalized else
                                          "个性化已关闭 · 标签调整仍会保存，在「偏好设置」开启后生效")
-            positive = [tag['name'] for tag in profile if tag['weight'] > 0][:8]
-            negative = [tag['name'] for tag in reversed(profile) if tag['weight'] < 0][:8]
             self.profile_label.set_text(
                 f"已记录 {sum(v > 0 for v in feedback.values())} 张正面反馈、"
-                f"{sum(v < 0 for v in feedback.values())} 张不喜欢 · {pending} 张待同步标签\n"
-                "更多尝试：" + ("、".join(positive) or "还没有足够的标签") + "\n"
-                "减少推荐：" + ("、".join(negative) or "暂无")
+                f"{sum(v < 0 for v in feedback.values())} 张不喜欢 · {pending} 张待同步标签"
             )
             self.render_tag_rows(profile)
         self.task(work, done)
@@ -874,6 +985,7 @@ class PerchWindow(Adw.ApplicationWindow):
         self.switch(group, "favorites_influence", "收藏也参与推荐", self.config.favorites_influence,
                     "同一张图片同时喜欢和收藏，只计算一次正面反馈")
         group.add(button("在「我喜欢的」管理推荐标签", "emblem-favorite-symbolic", self.show_tag_manager))
+        group.add(button("管理规格标签中立名单", "emblem-system-symbolic", self.show_spec_settings))
         group = self.group(page, "桌面集成", "仅在点击「设为桌面壁纸」时更换桌面背景。")
         self.dropdown(group, "wallpaper_backend", "壁纸后端", ["auto", "dms", "awww", "swww", "gnome", "none"],
                       ["自动检测", "DankMaterialShell", "awww", "swww", "GNOME", "不设置桌面背景"], self.config.wallpaper_backend)

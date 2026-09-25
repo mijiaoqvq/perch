@@ -55,11 +55,11 @@ def sync_feedback(config, library, fetcher):
     return synced
 
 
-def score_tags(tags, profile):
-    weights = {tag_key(tag['name']): tag['weight'] for tag in profile if not is_spec_tag(tag['name'])}
-    ignored = {tag_key(tag['name']) for tag in profile if tag.get('ignored') or is_spec_tag(tag['name'])}
+def score_tags(tags, profile, spec_policy=is_spec_tag):
+    weights = {tag_key(tag['name']): tag['weight'] for tag in profile if not spec_policy(tag['name'])}
+    ignored = {tag_key(tag['name']) for tag in profile if tag.get('ignored') or spec_policy(tag['name'])}
     unique = {tag_key(tag['name']) for tag in tags or []
-              if not is_spec_tag(tag['name']) and tag_key(tag['name']) not in ignored}
+              if not spec_policy(tag['name']) and tag_key(tag['name']) not in ignored}
     # Neutral tags must not indirectly penalize a wallpaper through the divisor.
     return sum(weights.get(key, 0) for key in unique) / math.sqrt(max(1, len(unique)))
 
@@ -81,9 +81,9 @@ def optional_source(stream):
         LOG.warning('偏好标签搜索暂不可用，继续普通发现：%s', exc)
 
 
-def order_pool(pool, profile, offset=0):
+def order_pool(pool, profile, offset=0, spec_policy=is_spec_tag):
     """Every fourth result retains source order to leave room for exploration."""
-    scored = [(item, score_tags(tags, profile), index) for index, (item, tags) in enumerate(pool)]
+    scored = [(item, score_tags(tags, profile, spec_policy), index) for index, (item, tags) in enumerate(pool)]
     result = []
     while scored:
         if (offset + len(result) + 1) % 4 == 0:
@@ -98,15 +98,16 @@ def order_pool(pool, profile, offset=0):
 def candidates(config, library, client, fetcher, eligible):
     """Mix tag searches with ordinary discovery, then rank a bounded lookahead."""
     profile = []
+    policy = library.spec_policy()
     if config.personalized:
         sync_feedback(config, library, fetcher)
-        profile = library.tag_profile(config.favorites_influence)
+        profile = library.tag_profile(config.favorites_influence, spec_policy=policy)
     streams = [client.candidates(config)]
     # Wallhaven exact-tag searches cannot be combined with a user's query.
     # Keep explicit queries intact and only rerank their results.
     if config.personalized and profile and not config.query.strip():
         for tag in [tag for tag in profile if tag['weight'] > 0 and not tag.get('ignored')
-                    and not is_spec_tag(tag['name'])][:2]:
+                    and not policy(tag['name'])][:2]:
             query = f"id:{tag['id']}" if tag['id'] is not None else tag['name']
             streams.append(optional_source(client.candidates(replace(config, query=query, max_pages=1))))
     encountered = set()
@@ -134,5 +135,5 @@ def candidates(config, library, client, fetcher, eligible):
             enriched.append((item, tags))
         LOG.info('个性化推荐 · 根据 %s 个标签排列 %s 张候选，保留探索机会',
                  sum(tag['weight'] != 0 for tag in profile), len(pool))
-        yield from order_pool(enriched, profile, offset)
+        yield from order_pool(enriched, profile, offset, policy)
         offset += len(pool)

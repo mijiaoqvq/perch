@@ -51,12 +51,12 @@ def excepthook(kind, value, tb):
 sys.excepthook = excepthook
 
 
-def capture(name):
+def capture(name, widget=None):
     # Use the native GTK renderer to capture only this application window.
     import ctypes
     import ctypes.util
     from gi.repository import Gsk, Graphene
-    widget = app.window
+    widget = widget or app.window
     snapshot = Gtk.Snapshot()
     paintable = Gtk.WidgetPaintable.new(widget)
     paintable.snapshot(snapshot, widget.get_width(), widget.get_height())
@@ -128,6 +128,7 @@ def check():
         return True
     if stage == 0:
         assert len(win.items) == 9
+        assert win.gallery_hero.get_visible()
         assert sum(i.favorite for i in win.items) == 2
         if not capture('gallery'):
             return True
@@ -138,6 +139,7 @@ def check():
             return True
         navigate('favorites')
         assert win.page_name == 'favorites'
+        assert not win.gallery_hero.get_visible()
         stage = 2
     elif stage == 2:
         if not capture('favorites'):
@@ -237,9 +239,11 @@ def check():
         assert not item.favorite
         navigate('likes')
         assert win.page_name == 'likes'
+        assert not win.gallery_hero.get_visible()
         assert win.gallery_stack.get_visible_child_name() == 'tags'
         win.likes_tab_buttons['images'].emit('clicked')
         assert win.gallery_stack.get_visible_child_name() == 'images'
+        assert not win.gallery_hero.get_visible()
         stage = 12
     elif stage == 12:
         if not capture('likes'):
@@ -269,7 +273,7 @@ def check():
         if saved.personalized:
             return True
         assert not saved.favorites_influence
-        assert 'sky' in win.profile_label.get_text()
+        assert 'sky' in win.tag_widgets
         win.show_tag_manager()
         assert win.page_name == 'likes'
         assert win.gallery_stack.get_visible_child_name() == 'tags'
@@ -285,10 +289,10 @@ def check():
         if win.tag_edit_busy or 'cherry blossoms' not in win.tag_widgets:
             return True
         assert win.tag_entry.get_text() == ''
-        win.tag_widgets['sky']['select'].set_selected(2)
+        win.tag_widgets['sky']['avoid'].emit('clicked')
         stage = 18
     elif stage == 18:
-        if win.tag_edit_busy or win.tag_widgets['sky']['select'].get_selected() != 2:
+        if win.tag_edit_busy or not win.tag_widgets['sky']['avoid'].has_css_class('suggested-action'):
             return True
         assert next(t for t in library.tag_profile() if t['key'] == 'sky')['mode'] == 'avoid'
         win.tag_widgets['sky']['remove'].emit('clicked')
@@ -297,7 +301,7 @@ def check():
         if win.tag_edit_busy or 'restore' not in win.tag_widgets['sky']:
             return True
         assert next(t for t in library.tag_profile() if t['key'] == 'sky')['weight'] == 0
-        win.tag_widgets['sky']['expander'].set_expanded(True)
+        win.tag_widgets['sky']['chip'].open_details()
         if hasattr(win.toast_overlay, 'dismiss_all'):
             win.toast_overlay.dismiss_all()
         stage = 20
@@ -307,7 +311,7 @@ def check():
         win.tag_widgets['sky']['restore'].emit('clicked')
         stage = 21
     elif stage == 21:
-        if win.tag_edit_busy or 'select' not in win.tag_widgets['sky']:
+        if win.tag_edit_busy or 'auto' not in win.tag_widgets['sky']:
             return True
         assert next(t for t in library.tag_profile() if t['key'] == 'sky')['mode'] == 'auto'
         win.tag_entry.set_text('4k')
@@ -335,13 +339,81 @@ def check():
         if not capture('tag-preferences'):
             return True
         assert library.favorite_ids() == {'demo01', 'demo04', 'demo08'}
+        # Exercise the motion-controller path: hover opens the card after a delay.
+        win.tag_widgets['sky']['chip'].motion.emit('enter', 10.0, 10.0)
         stage = 25
+    elif stage == 25:
+        chip = win.tag_widgets['sky']['chip']
+        assert chip.popover.get_visible()
+        chip.motion.emit('leave')
+        chip.panel_motion.emit('enter', 10.0, 10.0)
+        stage = 26
+    elif stage == 26:
+        chip = win.tag_widgets['sky']['chip']
+        assert chip.popover.get_visible(), 'Card must stay open when crossing into its actions'
+        if not capture('tag-hover'):
+            return True
+        if not capture('tag-actions', chip.popover):
+            return True
+        chip.panel_motion.emit('leave')
+        stage = 27
+    elif stage == 27:
+        assert not win.tag_widgets['sky']['chip'].popover.get_visible()
+        win.show_spec_settings()
+        stage = 28
+    elif stage == 28:
+        if not getattr(win, 'spec_widgets', None):
+            return True
+        assert '4k' in win.spec_widgets
+        win.spec_entry.set_text('sky')
+        win.spec_add_button.emit('clicked')
+        stage = 29
+    elif stage == 29:
+        if win.spec_busy or 'sky' not in win.spec_widgets or 'sky' in win.tag_widgets:
+            return True
+        assert library.spec_policy()('sky')
+        win.spec_widgets['sky']['remove'].emit('clicked')
+        stage = 30
+    elif stage == 30:
+        if win.spec_busy or 'sky' in win.spec_widgets or 'sky' not in win.tag_widgets:
+            return True
+        win.spec_widgets['4k']['remove'].emit('clicked')
+        stage = 31
+    elif stage == 31:
+        if win.spec_busy or '4k' in win.spec_widgets or '4k' not in win.tag_widgets:
+            return True
+        assert not library.spec_policy()('4K')
+        win.spec_entry.set_text('4K')
+        win.spec_add_button.emit('clicked')
+        stage = 32
+    elif stage == 32:
+        if win.spec_busy or '4k' not in win.spec_widgets or '4k' in win.tag_widgets:
+            return True
+        if not capture('spec-settings', win.spec_window):
+            return True
+        win.spec_window.close()
+        # Local Gtk.Settings changes affect only this isolated test application.
+        win.original_test_font = Gtk.Settings.get_default().get_property('gtk-font-name')
+        Gtk.Settings.get_default().set_property('gtk-font-name', 'Serif 13')
+        stage = 33
+    elif stage == 33:
+        assert win.profile_label.get_pango_context().get_font_description().get_family() == 'Serif'
+        assert win.log_view.get_pango_context().get_font_description().get_family() == 'Serif'
+        Gtk.Settings.get_default().set_property('gtk-font-name', win.original_test_font)
+        win.tag_widgets['sky']['chip'].popup()  # Keyboard/click path.
+        stage = 34
+    elif stage == 34:
+        assert win.tag_widgets['sky']['chip'].popover.get_visible()
+        navigate('library')
+        assert not win.tag_widgets['sky']['chip'].popover.get_visible()
+        assert win.gallery_hero.get_visible()
+        stage = 35
     else:
-        print('GUI PASS: gallery, favorite, likes, independent feedback, settings, manual tag add/override/remove/restore, neutral specs, logs, search, dislike replacement, next preview, failure recovery', flush=True)
+        print('GUI PASS: gallery-only summary, hashtag hover/click cards, manual preferences, editable spec list, live system font, favorite/like protection, replacement and recovery', flush=True)
         app.quit()
         return False
     return True
 
 GLib.timeout_add(1200, check)
 app.run([])
-raise SystemExit(1 if errors or stage < 25 else 0)
+raise SystemExit(1 if errors or stage < 35 else 0)

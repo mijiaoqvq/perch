@@ -178,3 +178,55 @@ class TagPreferenceTests(TemporaryLibrary):
         self.assertEqual(client.queries, [''])
         self.library.set_tag_override('4k', None)
         self.assertEqual(self.library.tag_profile(include_specs=True), [])
+
+    def test_custom_spec_is_neutral_in_learning_search_and_score_divisor(self):
+        self.feedback('learn0', tags(1, 2))
+        self.library.set_spec_tag('CITY', True)
+        self.library.set_spec_tag('custom display spec', True)
+        policy = self.library.spec_policy()
+        profile = self.library.tag_profile()
+        self.assertEqual([tag['name'] for tag in profile], ['sky'])
+        more = tags(1, 2) + [{'id': 17, 'name': 'custom display spec'}]
+        self.assertEqual(score_tags(more, profile, policy), score_tags(tags(1), profile, policy))
+        _, client = self.discover()
+        self.assertEqual(client.queries, ['', 'id:1'])
+        with self.assertRaisesRegex(ValueError, '始终保持中立'):
+            self.library.set_tag_override('city', 'prefer')
+
+    def test_removed_default_spec_stays_removed_after_restart_and_sync(self):
+        spec = [{'id': 4, 'name': '4K'}]
+        self.feedback('learn0', spec)
+        self.library.set_spec_tag('４Ｋ', False)
+        self.library.save_tags('learn0', spec)
+        self.library = Library(self.library.directory, self.library.state)
+        self.assertFalse(self.library.spec_policy()('4k'))
+        self.assertNotIn('4k', {tag['key'] for tag in self.library.spec_entries()})
+        self.library.set_tag_override('4k', 'prefer')
+        self.assertGreater(score_tags(spec, self.library.tag_profile(), self.library.spec_policy()), 0)
+        _, client = self.discover()
+        self.assertIn('id:4', client.queries)
+        self.library.set_spec_tag('4K', True)
+        self.assertTrue(self.library.spec_policy()('4k'))
+        self.assertEqual(self.library.tag_profile(), [])
+
+    def test_custom_spec_removal_restores_existing_preferences(self):
+        self.library.set_tag_override('sky', 'avoid')
+        self.library.set_spec_tag('sky', True)
+        self.assertEqual(self.library.tag_profile(), [])
+        self.library.set_spec_tag('sky', False)
+        self.assertEqual(self.library.tag_profile()[0]['mode'], 'avoid')
+        self.assertLess(self.library.tag_profile()[0]['weight'], 0)
+
+    def test_spec_list_defaults_auto_discovery_and_normalization(self):
+        before = self.library.spec_entries()
+        self.assertIn('4k', {tag['key'] for tag in before})
+        self.library.save_tags('learn0', [{'id': 10, 'name': '5120x2880'}])
+        self.library.set_spec_tag(' ＨＤＲ ', True)
+        self.library.set_spec_tag('hdr', True)
+        after = self.library.spec_entries()
+        self.assertEqual(len(after), len(before) + 2)
+        self.assertIn('5120x2880', {tag['key'] for tag in after})
+        self.library.set_spec_tag('5120x2880', False)
+        self.assertFalse(self.library.spec_policy()('5120x2880'))
+        with self.assertRaises(ValueError):
+            self.library.set_spec_tag('', True)

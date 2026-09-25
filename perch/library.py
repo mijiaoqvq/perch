@@ -6,7 +6,7 @@ import fcntl
 import re
 import sqlite3
 import time
-from .tag_policy import is_spec_tag, tag_key
+from .tag_policy import DEFAULT_SPEC_TAGS, SpecPolicy, is_spec_tag, tag_key, validate_tag_name
 
 NAME = re.compile(r"wallhaven-([a-z0-9]{6})\.(jpg|png|webp)\Z")
 
@@ -41,6 +41,8 @@ class Library:
                        "retry_after REAL NOT NULL DEFAULT 0)")
             db.execute("CREATE TABLE IF NOT EXISTS tag_overrides (name TEXT PRIMARY KEY, label TEXT NOT NULL, "
                        "mode TEXT NOT NULL CHECK(mode IN ('prefer', 'avoid', 'ignore')))")
+            db.execute("CREATE TABLE IF NOT EXISTS spec_tag_overrides (name TEXT PRIMARY KEY, label TEXT NOT NULL, "
+                       "enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)))")
 
     @contextmanager
     def connect(self):
@@ -168,15 +170,11 @@ class Library:
                        "DO UPDATE SET retry_after=excluded.retry_after", (wid, time.time() + 3600))
 
     def set_tag_override(self, name, mode):
-        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200 or any(ord(c) < 32 for c in name):
-            raise ValueError("请输入有效的 Wallhaven 标签名称（最多 200 字符）")
-        key = tag_key(name)
-        if re.search(r"(?:^|\s)(?:(?:id|like|type):|[@+\-])", key):
-            raise ValueError("请填写标签名称，不要填写搜索表达式")
+        key = validate_tag_name(name)
         if mode not in (None, "prefer", "avoid", "ignore"):
             raise ValueError("未知的标签偏好")
-        if mode is not None and is_spec_tag(name):
-            raise ValueError("4K、分辨率等规格标签始终保持中立，不参与偏好推荐或排除")
+        if mode is not None and self.spec_policy()(name):
+            raise ValueError("规格名单中的标签始终保持中立；请先在设置中移出名单，再调整偏好")
         with self.connect() as db:
             if mode is None:
                 db.execute("DELETE FROM tag_overrides WHERE name=?", (key,))
@@ -184,7 +182,33 @@ class Library:
                 db.execute("INSERT INTO tag_overrides VALUES (?, ?, ?) ON CONFLICT(name) "
                            "DO UPDATE SET label=excluded.label, mode=excluded.mode", (key, name.strip(), mode))
 
-    def tag_profile(self, include_favorites=True, include_specs=False):
+    def spec_policy(self):
+        with self.connect() as db:
+            return SpecPolicy(db.execute("SELECT name, enabled FROM spec_tag_overrides"))
+
+    def spec_entries(self):
+        names = {tag_key(name): dict(key=tag_key(name), name=name, source="默认规格") for name in DEFAULT_SPEC_TAGS}
+        with self.connect() as db:
+            for (name,) in db.execute("SELECT name FROM tags"):
+                if is_spec_tag(name):
+                    names.setdefault(tag_key(name), dict(key=tag_key(name), name=name, source="自动识别"))
+            for key, name, enabled in db.execute("SELECT name, label, enabled FROM spec_tag_overrides"):
+                if enabled:
+                    names[key] = dict(key=key, name=name, source="手动添加")
+                else:
+                    names.pop(key, None)
+        return sorted(names.values(), key=lambda tag: tag['key'])
+
+    def set_spec_tag(self, name, enabled):
+        key = validate_tag_name(name)
+        if type(enabled) is not bool:
+            raise ValueError("规格标签的启用状态必须为布尔值")
+        with self.connect() as db:
+            db.execute("INSERT INTO spec_tag_overrides VALUES (?, ?, ?) ON CONFLICT(name) "
+                       "DO UPDATE SET label=excluded.label, enabled=excluded.enabled", (key, name.strip(), enabled))
+
+    def tag_profile(self, include_favorites=True, include_specs=False, spec_policy=None):
+        policy = spec_policy if spec_policy is not None else self.spec_policy()
         feedback = self.feedback(include_favorites)
         counts = {}
         with self.connect() as db:
@@ -206,7 +230,7 @@ class Library:
             pos, neg = tag["positive"], tag["negative"]
             tag["auto_weight"] = (pos - 1.5 * neg) / (pos + neg + 2)
             tag["weight"] = {"prefer": 1.0, "avoid": -1.5, "ignore": 0.0}.get(tag["mode"], tag["auto_weight"])
-            tag["technical"] = is_spec_tag(tag["name"])
+            tag["technical"] = bool(policy(tag["name"]))
             tag["ignored"] = tag["technical"] or tag["mode"] == "ignore"
             if tag["ignored"]:
                 tag["weight"] = 0.0
