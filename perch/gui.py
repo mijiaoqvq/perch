@@ -133,6 +133,9 @@ class PerchWindow(Adw.ApplicationWindow):
         self.items = []
         self.thumbnails = {}
         self.page_name = "library"
+        self.likes_view = "tags"
+        self.profile_generation = 0
+        self.tag_edit_busy = False
         self.process = None
         self.job_kind = None
         self.job_output = None
@@ -235,14 +238,14 @@ class PerchWindow(Adw.ApplicationWindow):
             self.stack.set_visible_child_name("gallery")
             self.gallery_title.set_text({"favorites": "我的收藏", "likes": "我喜欢的"}.get(row.page, "让桌面，常有新风景。"))
             self.gallery_sub.set_text({"favorites": "收藏的壁纸不会被自动清理。喜欢和收藏可以分别设置。",
-                                       "likes": "喜欢用来表达偏好，仍会参与清理。这里只显示还在本地的图片。"}.get(
+                                       "likes": "从喜欢中学习，也听你的调整。喜欢表达偏好，收藏保留图片。"}.get(
                                            row.page, "喜欢让推荐更懂你，收藏让风景留下来。"))
             self.render_gallery()
         else:
             self.stack.set_visible_child_name(row.page)
         if row.page == "activity":
             self.read_logs()
-        elif row.page == "settings":
+        elif row.page in ("settings", "likes"):
             self.refresh_profile()
 
     def build_gallery(self):
@@ -263,9 +266,10 @@ class PerchWindow(Adw.ApplicationWindow):
         heading.append(self.update_button)
         page.append(heading)
         hero = box(Gtk.Orientation.HORIZONTAL, 30, "hero")
+        self.gallery_hero = hero
         hero_text = box()
         hero_text.set_hexpand(True)
-        hero_text.append(label("风景会更新，喜欢的会留下。", "hero-title"))
+        hero_text.append(label("让风景常新，让收藏留下。", "hero-title"))
         self.rule_label = label("", "hero-sub")
         hero_text.append(self.rule_label)
         self.schedule_label = label("正在读取更新计划…", "hero-sub")
@@ -275,7 +279,21 @@ class PerchWindow(Adw.ApplicationWindow):
         self.fav_stat = self.stat(hero, "已收藏")
         self.size_stat = self.stat(hero, "占用 MB")
         page.append(hero)
+        self.likes_tabs = box(Gtk.Orientation.HORIZONTAL, 6)
+        self.likes_tabs.set_margin_top(22)
+        self.likes_tabs.set_margin_bottom(18)
+        self.likes_tab_buttons = {}
+        for key, title in (("tags", "推荐标签"), ("images", "喜欢的壁纸")):
+            tab = Gtk.ToggleButton(label=title)
+            if self.likes_tab_buttons:
+                tab.set_group(self.likes_tab_buttons["tags"])
+            tab.set_active(key == self.likes_view)
+            tab.connect("toggled", lambda widget, view=key: self.set_likes_view(view) if widget.get_active() else None)
+            self.likes_tab_buttons[key] = tab
+            self.likes_tabs.append(tab)
+        page.append(self.likes_tabs)
         toolbar = box(Gtk.Orientation.HORIZONTAL, 10)
+        self.library_toolbar = toolbar
         self.search = Gtk.SearchEntry(placeholder_text="搜索本地壁纸 ID…")
         self.search.set_hexpand(True)
         self.search.connect("search-changed", lambda *_: self.render_gallery())
@@ -301,12 +319,140 @@ class PerchWindow(Adw.ApplicationWindow):
                                description="点击「立即更新」下载壁纸，或在偏好设置中选择已有目录。")
         self.empty = empty
         self.gallery_stack.add_named(empty, "empty")
+        self.build_tag_manager()
         footer = box(Gtk.Orientation.HORIZONTAL, 12, "footer")
         self.count_label = label("正在整理图库…", "caption")
         self.count_label.set_hexpand(True)
         footer.append(self.count_label)
         footer.append(label("ANIME  ·  SFW", "pill"))
         page.append(footer)
+
+    def set_likes_view(self, view):
+        self.likes_view = view
+        tab = self.likes_tab_buttons[view]
+        if not tab.get_active():
+            tab.set_active(True)
+        self.render_gallery()
+        if view == "tags":
+            self.refresh_profile()
+
+    def show_tag_manager(self):
+        self.set_likes_view("tags")
+        row = self.nav.get_first_child()
+        while row:
+            if row.page == "likes":
+                self.nav.select_row(row)
+                break
+            row = row.get_next_sibling()
+
+    def build_tag_manager(self):
+        scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        page = box(spacing=14)
+        page.set_margin_end(8)
+        scroll.set_child(page)
+        self.gallery_stack.add_named(scroll, "tags")
+        self.profile_status = label("", "caption", wrap=True)
+        page.append(self.profile_status)
+        self.profile_label = label("正在读取偏好记录…", "caption", wrap=True)
+        page.append(self.profile_label)
+        self.tag_editor = box(spacing=14)
+        page.append(self.tag_editor)
+        add = box(Gtk.Orientation.HORIZONTAL, 10)
+        self.tag_entry = Gtk.Entry(placeholder_text="添加 Wallhaven 标签，例如 sky 或 cherry blossoms")
+        self.tag_entry.set_hexpand(True)
+        self.tag_entry.set_max_length(200)
+        self.tag_entry.connect("activate", lambda *_: self.add_tag_override())
+        add.append(self.tag_entry)
+        self.tag_direction = Gtk.DropDown.new_from_strings(["更多推荐", "减少推荐"])
+        add.append(self.tag_direction)
+        self.tag_add_button = button("添加标签", "list-add-symbolic", self.add_tag_override, "suggested-action")
+        add.append(self.tag_add_button)
+        self.tag_editor.append(add)
+        self.tag_editor.append(label("手动设置优先于自动学习，立即保存并影响后续下载。移除标签后，它将不再影响推荐。", "caption", wrap=True))
+        self.tag_rows = box(spacing=16)
+        self.tag_editor.append(self.tag_rows)
+        neutral = Adw.PreferencesGroup(title="规格标签 · 始终中立",
+                                      description="4K、分辨率、画幅比例等不参与推荐加分或减分。尺寸要求仍由偏好设置单独控制。")
+        self.neutral_label = label("", "caption", wrap=True)
+        neutral.add(self.neutral_label)
+        page.append(neutral)
+        sync = box(Gtk.Orientation.HORIZONTAL, 12)
+        sync.append(button("同步已有反馈的标签", "view-refresh-symbolic", self.sync_tags))
+        self.sync_label = label("旧图和已删除图片的标签会在同步或下次下载时补全", "caption", wrap=True)
+        self.sync_label.set_hexpand(True)
+        sync.append(self.sync_label)
+        page.append(sync)
+
+    def add_tag_override(self):
+        name = self.tag_entry.get_text()
+        mode = "prefer" if self.tag_direction.get_selected() == 0 else "avoid"
+        self.change_tag_override(name, mode, clear_entry=True)
+
+    def change_tag_override(self, name, mode, clear_entry=False):
+        if self.tag_edit_busy:
+            return
+        self.tag_edit_busy = True
+        self.profile_generation += 1
+        self.tag_editor.set_sensitive(False)
+        library = self.library
+        def done(_, error):
+            self.tag_edit_busy = False
+            self.tag_editor.set_sensitive(True)
+            if not error:
+                if clear_entry and self.tag_entry.get_text() == name:
+                    self.tag_entry.set_text("")
+                self.toast({None: "已恢复自动学习", "prefer": "已设为更多推荐", "avoid": "已设为减少推荐",
+                            "ignore": "已移除标签；后续学习不会自动加回，可随时恢复"}[mode])
+            self.refresh_profile()
+        self.task(lambda: library.set_tag_override(name, mode), done)
+
+    def render_tag_rows(self, profile):
+        child = self.tag_rows.get_first_child()
+        while child:
+            self.tag_rows.remove(child)
+            child = self.tag_rows.get_first_child()
+        self.tag_widgets = {}
+        active = [tag for tag in profile if not tag['ignored']]
+        ignored = [tag for tag in profile if tag['mode'] == 'ignore' and not tag['technical']]
+        group = Adw.PreferencesGroup(title=f"推荐标签 · {len(active)}",
+                                    description="自动学习会随反馈变化；手动调整会一直保留。减少推荐会降低优先级，不会完全屏蔽。")
+        self.tag_rows.append(group)
+        if not active:
+            group.add(label("还没有推荐标签。可以手动添加，或喜欢几张壁纸后同步标签。", "caption", wrap=True))
+        for tag in active:
+            direction = "更多推荐" if tag['weight'] > 0 else "减少推荐" if tag['weight'] < 0 else "暂时中立"
+            row = Adw.ActionRow(title=tag['name'], subtitle=f"{direction} · {tag['positive']} 次正面反馈 / {tag['negative']} 次不喜欢")
+            row.set_use_markup(False)
+            row.set_title_lines(1)
+            row.set_subtitle_lines(2)
+            select = Gtk.DropDown.new_from_strings(["自动学习", "更多推荐", "减少推荐"])
+            modes = [None, "prefer", "avoid"]
+            select.set_selected(modes.index(None if tag['mode'] == 'auto' else tag['mode']))
+            select.set_valign(Gtk.Align.CENTER)
+            select.set_tooltip_text("选择自动学习，或用手动偏好覆盖学习结果")
+            select.connect("notify::selected", lambda widget, _, name=tag['name']: self.change_tag_override(name, modes[widget.get_selected()]))
+            row.add_suffix(select)
+            remove = button(icon="list-remove-symbolic", action=lambda name=tag['name']: self.change_tag_override(name, "ignore"),
+                            tooltip="移除这个标签，不再用它影响推荐（可恢复）")
+            remove.set_valign(Gtk.Align.CENTER)
+            row.add_suffix(remove)
+            group.add(row)
+            self.tag_widgets[tag['key']] = dict(row=row, select=select, remove=remove)
+        if ignored:
+            group = Adw.PreferencesGroup()
+            expander = Adw.ExpanderRow(title=f"已移除的标签 · {len(ignored)}", subtitle="不参与加分或减分，不会被自动学习加回")
+            group.add(expander)
+            self.tag_rows.append(group)
+            for tag in ignored:
+                row = Adw.ActionRow(title=tag['name'])
+                row.set_use_markup(False)
+                restore = button("恢复自动学习", action=lambda name=tag['name']: self.change_tag_override(name, None))
+                restore.set_valign(Gtk.Align.CENTER)
+                row.add_suffix(restore)
+                expander.add_row(row)
+                self.tag_widgets[tag['key']] = dict(row=row, restore=restore, expander=expander)
+        specs = [tag['name'] for tag in profile if tag['technical']]
+        self.neutral_label.set_text("已忽略规格标签：" + "、".join(specs) if specs else "例如：4K、8K、Ultra HD、3840×2160、16:9")
 
     def stat(self, parent, caption):
         group = box(spacing=3)
@@ -379,6 +525,14 @@ class PerchWindow(Adw.ApplicationWindow):
         self.rule_label.set_text(f"保留 {self.config.keep} 张普通壁纸  ·  每次新增 {self.config.batch} 张  ·  收藏额外保存")
         liked = sum(item.liked for item in self.items)
         self.count_label.set_text(f"{len(items)} 张壁纸  /  {liked} 张喜欢  /  {favorites} 张收藏受保护")
+        tags_view = self.page_name == "likes" and self.likes_view == "tags"
+        self.likes_tabs.set_visible(self.page_name == "likes")
+        self.library_toolbar.set_visible(not tags_view)
+        self.gallery_hero.set_visible(not tags_view)
+        if tags_view:
+            self.count_label.set_text("偏好保存在本机 · 标签调整不会更改壁纸的喜欢或收藏状态")
+            self.gallery_stack.set_visible_child_name("tags")
+            return
         self.gallery_stack.set_visible_child_name("images" if items else "empty")
         if self.search.get_text():
             self.empty.set_title("没有找到这张壁纸")
@@ -552,15 +706,21 @@ class PerchWindow(Adw.ApplicationWindow):
         return "标签：" + " · ".join(tag['name'] for tag in tags) if tags else "Wallhaven 暂无标签"
 
     def refresh_profile(self):
+        if self.tag_edit_busy:
+            return
+        self.profile_generation += 1
+        generation = self.profile_generation
         library, config = self.library, self.config
         def work():
             feedback = library.feedback(config.favorites_influence)
             pending = sum(library.tags_for(wid) is None for wid in feedback)
-            return feedback, pending, library.tag_profile(config.favorites_influence)
+            return feedback, pending, library.tag_profile(config.favorites_influence, include_specs=True)
         def done(result, error):
-            if error or library is not self.library:
+            if error or library is not self.library or generation != self.profile_generation:
                 return
             feedback, pending, profile = result
+            self.profile_status.set_text("个性化已开启 · 手动调整与自动学习共同影响推荐" if self.config.personalized else
+                                         "个性化已关闭 · 标签调整仍会保存，在「偏好设置」开启后生效")
             positive = [tag['name'] for tag in profile if tag['weight'] > 0][:8]
             negative = [tag['name'] for tag in reversed(profile) if tag['weight'] < 0][:8]
             self.profile_label.set_text(
@@ -569,6 +729,7 @@ class PerchWindow(Adw.ApplicationWindow):
                 "更多尝试：" + ("、".join(positive) or "还没有足够的标签") + "\n"
                 "减少推荐：" + ("、".join(negative) or "暂无")
             )
+            self.render_tag_rows(profile)
         self.task(work, done)
 
     def sync_tags(self, wid=None, callback=None):
@@ -712,11 +873,7 @@ class PerchWindow(Adw.ApplicationWindow):
                     "混合偏好标签与普通发现，保留约四分之一的探索机会")
         self.switch(group, "favorites_influence", "收藏也参与推荐", self.config.favorites_influence,
                     "同一张图片同时喜欢和收藏，只计算一次正面反馈")
-        self.profile_label = label("正在读取偏好记录…", "caption", wrap=True)
-        group.add(self.profile_label)
-        group.add(button("同步已有反馈的标签", "view-refresh-symbolic", self.sync_tags))
-        self.sync_label = label("旧图和已删除图片的标签会在同步或下次下载时补全", "caption", wrap=True)
-        group.add(self.sync_label)
+        group.add(button("在「我喜欢的」管理推荐标签", "emblem-favorite-symbolic", self.show_tag_manager))
         group = self.group(page, "桌面集成", "仅在点击「设为桌面壁纸」时更换桌面背景。")
         self.dropdown(group, "wallpaper_backend", "壁纸后端", ["auto", "dms", "awww", "swww", "gnome", "none"],
                       ["自动检测", "DankMaterialShell", "awww", "swww", "GNOME", "不设置桌面背景"], self.config.wallpaper_backend)

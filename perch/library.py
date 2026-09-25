@@ -6,6 +6,7 @@ import fcntl
 import re
 import sqlite3
 import time
+from .tag_policy import is_spec_tag, tag_key
 
 NAME = re.compile(r"wallhaven-([a-z0-9]{6})\.(jpg|png|webp)\Z")
 
@@ -38,6 +39,8 @@ class Library:
                        "PRIMARY KEY(wallpaper_id, tag_id))")
             db.execute("CREATE TABLE IF NOT EXISTS tag_cache (id TEXT PRIMARY KEY, fetched REAL, "
                        "retry_after REAL NOT NULL DEFAULT 0)")
+            db.execute("CREATE TABLE IF NOT EXISTS tag_overrides (name TEXT PRIMARY KEY, label TEXT NOT NULL, "
+                       "mode TEXT NOT NULL CHECK(mode IN ('prefer', 'avoid', 'ignore')))")
 
     @contextmanager
     def connect(self):
@@ -164,20 +167,51 @@ class Library:
             db.execute("INSERT INTO tag_cache(id, retry_after) VALUES (?, ?) ON CONFLICT(id) "
                        "DO UPDATE SET retry_after=excluded.retry_after", (wid, time.time() + 3600))
 
-    def tag_profile(self, include_favorites=True):
+    def set_tag_override(self, name, mode):
+        if not isinstance(name, str) or not 1 <= len(name.strip()) <= 200 or any(ord(c) < 32 for c in name):
+            raise ValueError("请输入有效的 Wallhaven 标签名称（最多 200 字符）")
+        key = tag_key(name)
+        if re.search(r"(?:^|\s)(?:(?:id|like|type):|[@+\-])", key):
+            raise ValueError("请填写标签名称，不要填写搜索表达式")
+        if mode not in (None, "prefer", "avoid", "ignore"):
+            raise ValueError("未知的标签偏好")
+        if mode is not None and is_spec_tag(name):
+            raise ValueError("4K、分辨率等规格标签始终保持中立，不参与偏好推荐或排除")
+        with self.connect() as db:
+            if mode is None:
+                db.execute("DELETE FROM tag_overrides WHERE name=?", (key,))
+            else:
+                db.execute("INSERT INTO tag_overrides VALUES (?, ?, ?) ON CONFLICT(name) "
+                           "DO UPDATE SET label=excluded.label, mode=excluded.mode", (key, name.strip(), mode))
+
+    def tag_profile(self, include_favorites=True, include_specs=False):
         feedback = self.feedback(include_favorites)
         counts = {}
         with self.connect() as db:
+            known = {tag_key(name): (tid, name) for tid, name in db.execute("SELECT id, name FROM tags")}
+            counted = set()
             for wid, tid, name in db.execute("SELECT wallpaper_id, tags.id, tags.name FROM wallpaper_tags "
                                              "JOIN tags ON tag_id=tags.id"):
-                if wid not in feedback:
+                key = tag_key(name)
+                if wid not in feedback or (wid, key) in counted:
                     continue
-                tag = counts.setdefault(tid, dict(id=tid, name=name, positive=0, negative=0))
+                counted.add((wid, key))
+                tag = counts.setdefault(key, dict(id=tid, key=key, name=name, positive=0, negative=0, mode="auto"))
                 tag["positive" if feedback[wid] > 0 else "negative"] += 1
+            for key, name, mode in db.execute("SELECT name, label, mode FROM tag_overrides"):
+                tid, label = known.get(key, (None, name))
+                tag = counts.setdefault(key, dict(id=tid, key=key, name=label, positive=0, negative=0))
+                tag["mode"] = mode
         for tag in counts.values():
             pos, neg = tag["positive"], tag["negative"]
-            tag["weight"] = (pos - 1.5 * neg) / (pos + neg + 2)
-        return sorted(counts.values(), key=lambda tag: (-tag["weight"], tag["id"]))
+            tag["auto_weight"] = (pos - 1.5 * neg) / (pos + neg + 2)
+            tag["weight"] = {"prefer": 1.0, "avoid": -1.5, "ignore": 0.0}.get(tag["mode"], tag["auto_weight"])
+            tag["technical"] = is_spec_tag(tag["name"])
+            tag["ignored"] = tag["technical"] or tag["mode"] == "ignore"
+            if tag["ignored"]:
+                tag["weight"] = 0.0
+        return sorted((tag for tag in counts.values() if include_specs or not tag["technical"]),
+                      key=lambda tag: (-tag["weight"], tag["key"]))
 
     def finish_replacement(self, replacement, wid=None):
         """Remove only a disliked original, after the new file is safely installed."""

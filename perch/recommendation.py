@@ -4,6 +4,7 @@ import http.client
 from itertools import islice
 import logging
 import math
+from .tag_policy import is_spec_tag, tag_key
 
 LOG = logging.getLogger('perch')
 POOL_SIZE = 12
@@ -55,9 +56,12 @@ def sync_feedback(config, library, fetcher):
 
 
 def score_tags(tags, profile):
-    weights = {tag['id']: tag['weight'] for tag in profile}
-    unique = {tag['id'] for tag in tags or []}
-    return sum(weights.get(tid, 0) for tid in unique) / math.sqrt(max(1, len(unique)))
+    weights = {tag_key(tag['name']): tag['weight'] for tag in profile if not is_spec_tag(tag['name'])}
+    ignored = {tag_key(tag['name']) for tag in profile if tag.get('ignored') or is_spec_tag(tag['name'])}
+    unique = {tag_key(tag['name']) for tag in tags or []
+              if not is_spec_tag(tag['name']) and tag_key(tag['name']) not in ignored}
+    # Neutral tags must not indirectly penalize a wallpaper through the divisor.
+    return sum(weights.get(key, 0) for key in unique) / math.sqrt(max(1, len(unique)))
 
 
 def interleave(streams):
@@ -101,8 +105,10 @@ def candidates(config, library, client, fetcher, eligible):
     # Wallhaven exact-tag searches cannot be combined with a user's query.
     # Keep explicit queries intact and only rerank their results.
     if config.personalized and profile and not config.query.strip():
-        for tag in [tag for tag in profile if tag['weight'] > 0][:2]:
-            streams.append(optional_source(client.candidates(replace(config, query=f"id:{tag['id']}", max_pages=1))))
+        for tag in [tag for tag in profile if tag['weight'] > 0 and not tag.get('ignored')
+                    and not is_spec_tag(tag['name'])][:2]:
+            query = f"id:{tag['id']}" if tag['id'] is not None else tag['name']
+            streams.append(optional_source(client.candidates(replace(config, query=query, max_pages=1))))
     encountered = set()
 
     def unseen():
@@ -117,7 +123,7 @@ def candidates(config, library, client, fetcher, eligible):
                 yield item
 
     source = unseen()
-    if not config.personalized or not profile:
+    if not config.personalized or not any(tag['weight'] for tag in profile):
         yield from source
         return
     offset = 0
@@ -126,6 +132,7 @@ def candidates(config, library, client, fetcher, eligible):
         for item in pool:
             tags = fetcher.get(item['id'])
             enriched.append((item, tags))
-        LOG.info('个性化推荐 · 根据 %s 个标签排列 %s 张候选，保留探索机会', len(profile), len(pool))
+        LOG.info('个性化推荐 · 根据 %s 个标签排列 %s 张候选，保留探索机会',
+                 sum(tag['weight'] != 0 for tag in profile), len(pool))
         yield from order_pool(enriched, profile, offset)
         offset += len(pool)

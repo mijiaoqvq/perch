@@ -34,7 +34,8 @@ for index, (_, sky, sun, hill) in enumerate(colors):
     path = library.directory / f'wallhaven-demo0{index}.png'
     im.save(path)
     os.utime(path, (1000 + index, 1000 + index))
-    library.save_tags(f'demo0{index}', [{'id': index % 3 + 1, 'name': ['sky', 'forest', 'landscape'][index % 3]}])
+    library.save_tags(f'demo0{index}', [{'id': index % 3 + 1, 'name': ['sky', 'forest', 'landscape'][index % 3]},
+                                     {'id': 4, 'name': '4K'}])
 library.set_favorite('demo01', True)
 library.set_favorite('demo04', True)
 library.set_liked('demo02', True)
@@ -120,7 +121,7 @@ def fake_download(command, **kwargs):
 def check():
     global stage, attempts, preview, disliked_id
     attempts += 1
-    if attempts > 50:
+    if attempts > 75:
         raise AssertionError('GUI timed out')
     win = app.window
     if not win or win.refresh_busy:
@@ -236,6 +237,9 @@ def check():
         assert not item.favorite
         navigate('likes')
         assert win.page_name == 'likes'
+        assert win.gallery_stack.get_visible_child_name() == 'tags'
+        win.likes_tab_buttons['images'].emit('clicked')
+        assert win.gallery_stack.get_visible_child_name() == 'images'
         stage = 12
     elif stage == 12:
         if not capture('likes'):
@@ -266,20 +270,78 @@ def check():
             return True
         assert not saved.favorites_influence
         assert 'sky' in win.profile_label.get_text()
-        scroll = win.stack.get_child_by_name('settings')
-        adjustment = scroll.get_vadjustment()
-        adjustment.set_value(adjustment.get_upper() - adjustment.get_page_size())
+        win.show_tag_manager()
+        assert win.page_name == 'likes'
+        assert win.gallery_stack.get_visible_child_name() == 'tags'
         stage = 16
     elif stage == 16:
+        assert '个性化已关闭' in win.profile_status.get_text()
+        assert '4K' in win.neutral_label.get_text()
+        assert '4k' not in win.tag_widgets
+        win.tag_entry.set_text('cherry blossoms')
+        win.tag_add_button.emit('clicked')
+        stage = 17
+    elif stage == 17:
+        if win.tag_edit_busy or 'cherry blossoms' not in win.tag_widgets:
+            return True
+        assert win.tag_entry.get_text() == ''
+        win.tag_widgets['sky']['select'].set_selected(2)
+        stage = 18
+    elif stage == 18:
+        if win.tag_edit_busy or win.tag_widgets['sky']['select'].get_selected() != 2:
+            return True
+        assert next(t for t in library.tag_profile() if t['key'] == 'sky')['mode'] == 'avoid'
+        win.tag_widgets['sky']['remove'].emit('clicked')
+        stage = 19
+    elif stage == 19:
+        if win.tag_edit_busy or 'restore' not in win.tag_widgets['sky']:
+            return True
+        assert next(t for t in library.tag_profile() if t['key'] == 'sky')['weight'] == 0
+        win.tag_widgets['sky']['expander'].set_expanded(True)
+        if hasattr(win.toast_overlay, 'dismiss_all'):
+            win.toast_overlay.dismiss_all()
+        stage = 20
+    elif stage == 20:
         if not capture('personalization'):
             return True
-        stage = 17
+        win.tag_widgets['sky']['restore'].emit('clicked')
+        stage = 21
+    elif stage == 21:
+        if win.tag_edit_busy or 'select' not in win.tag_widgets['sky']:
+            return True
+        assert next(t for t in library.tag_profile() if t['key'] == 'sky')['mode'] == 'auto'
+        win.tag_entry.set_text('4k')
+        win.tag_add_button.emit('clicked')
+        stage = 22
+    elif stage == 22:
+        if win.tag_edit_busy:
+            return True
+        assert win.tag_entry.get_text() == '4k'
+        assert '4k' not in win.tag_widgets
+        # Turn personalization back on for the representative README screenshot.
+        win.tag_entry.set_text('')
+        navigate('settings')
+        win.controls['personalized'].set_active(True)
+        win.save_settings()
+        stage = 23
+    elif stage == 23:
+        if not load(root / 'config.json').personalized:
+            return True
+        win.show_tag_manager()
+        if hasattr(win.toast_overlay, 'dismiss_all'):
+            win.toast_overlay.dismiss_all()
+        stage = 24
+    elif stage == 24:
+        if not capture('tag-preferences'):
+            return True
+        assert library.favorite_ids() == {'demo01', 'demo04', 'demo08'}
+        stage = 25
     else:
-        print('GUI PASS: gallery, favorite, likes, independent feedback, personalization settings, tag profile, logs, search, dislike replacement, next preview, failure recovery', flush=True)
+        print('GUI PASS: gallery, favorite, likes, independent feedback, settings, manual tag add/override/remove/restore, neutral specs, logs, search, dislike replacement, next preview, failure recovery', flush=True)
         app.quit()
         return False
     return True
 
 GLib.timeout_add(1200, check)
 app.run([])
-raise SystemExit(1 if errors or stage < 17 else 0)
+raise SystemExit(1 if errors or stage < 25 else 0)
