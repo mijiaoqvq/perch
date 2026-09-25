@@ -1,9 +1,9 @@
 [Unit]
-Description=Refresh anime wallpapers every six hours
+Description=Perch - scheduled wallpaper updates
 
 [Timer]
 OnCalendar=*-*-* 00,06,12,18:00:00
-Persistent=true
+Persistent=false
 AccuracySec=1min
 Unit=wallhaven-anime.service
 

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=栖景 · Perch
+Name[en]=Perch
+GenericName=Wallhaven Wallpaper Manager
+GenericName[zh_CN]=Wallhaven 壁纸管理
+Comment=给喜欢的风景，留一个位置。
+Exec=perch
+Icon=io.github.mijiaoqvq.Perch
+Terminal=false
+Categories=Graphics;GTK;
+Keywords=wallpaper;wallhaven;壁纸;收藏;
+StartupNotify=true
+StartupWMClass=io.github.mijiaoqvq.Perch

@@ -1,5 +1,5 @@
 [Unit]
-Description=Download SFW anime 4K wallpapers and keep 20
+Description=Perch - refresh Wallhaven wallpapers with protected favourites
 
 [Service]
 Type=oneshot

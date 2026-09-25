@@ -1,141 +1,154 @@
-# Arch：SFW 二次元 4K 壁纸自动下载
+<div align="center">
+  <img src="assets/io.github.mijiaoqvq.Perch.svg" width="96" alt="栖景图标">
+  <h1>栖景 · Perch</h1>
+  <p><strong>给喜欢的风景，留一个位置。</strong></p>
+  <p>面向 Linux 的原生 Wallhaven 壁纸管理器 · GTK4 / libadwaita / Python</p>
+</div>
 
-此套件使用 Wallhaven API、Python/Pillow 和 systemd 用户定时器，无须 API Key。
+![栖景图库界面](docs/screenshot.png)
 
-## 默认行为
+栖景把 Wallhaven 的自动下载、定时更新和本地收藏放进一个原生桌面应用。它由原有的 `wallhaven-anime.py` 脚本发展而来，继续使用原来的图片目录、下载历史和 systemd 用户定时器。
 
-- 按本地时间每天 00:00、06:00、12:00、18:00 运行，定时精度为 1 分钟。
-- 筛选 Anime 分类、SFW、至少 3840×2160、严格 16:9 的静态原图。
-- 优先月度热门榜，候选不足时查年度热门榜；各榜最多扫描 100 页。
-- 首次从空目录下载 20 张。正常每次新增 3 张，并淘汰最早下载的图片，保留 20 张。
-- 不足 20 张时，本次下载数量为 `max(3, 20 - 当前有效张数)`。例如有 12 张时下载 8 张，有 19 张时下载 3 张并淘汰 2 张。
-- “新”指本机历史中没下载过，不要求是最近 6 小时上传的图片。
-- 用 Wallhaven ID 和原文件 SHA-256 去重，淘汰图片后继续保留历史。不同压缩、裁剪或水印版本可能仍算不同文件；没有进行视觉相似度去重。
-- 下载后验证真实格式、完整解码、尺寸和比例。API 的 16:9 过滤可能返回近似比例，脚本会再次严格检查。
-- 新图下载并校验成功后才淘汰旧图。下载失败或候选不足时保留已有有效图片，服务返回失败并记录日志，下个计划时间再尝试。
-- 临时文件不计入 20 张；新图完成替换到正式文件名和清理旧图之间，会短暂存在第 21 张。中断后下次运行会修复数量并清理残留临时文件。
+## 可以做什么
 
-默认壁纸目录：`~/Pictures/Wallpapers/`
+- **本地图库**：缩略图、大图预览、ID 搜索、时间 / 大小排序、打开原图与来源。
+- **收藏保护**：星标收藏在自动更新和手动清理时都会跳过；收藏额外保存，不占普通壁纸名额。
+- **可配置保留数量**：例如保留 20 张普通壁纸，加上 8 张收藏，总计 28 张。
+- **按自己的节奏更新**：时段内每隔 1–24 小时更新，支持跨午夜；也可指定每天多个时间点。
+- **后台运行**：关闭窗口后定时器仍然有效；可以暂停，也可以选择补执行错过的计划。
+- **发现偏好**：关键词、热门 / 最新 / 随机 / 收藏排序、最低尺寸和严格比例。
+- **清理前预览**：显示待删除的文件和空间，确认时重新检查收藏状态。
+- **更新记录**：下载进度、错误与清理日志，后台任务和界面共用同一套下载逻辑。
+- **设为桌面壁纸**：支持 DankMaterialShell、awww、swww 和 GNOME。自动检测优先顺序为 DMS → awww → swww → GNOME，也可手动指定。
 
-默认历史目录：`${XDG_STATE_HOME:-$HOME/.local/state}/wallhaven-anime/`
+默认只下载 **Anime / SFW 静态原图**，最低 3840×2160、严格 16:9，普通壁纸保留 20 张，每次新增 3 张；热门榜从月榜不足时扩展到年榜。SFW 依赖 Wallhaven 社区标签。
 
-只管理目标目录中符合 `wallhaven-六位ID.jpg/png/webp` 命名的文件。请将它作为专用目录；这些文件中的损坏文件、重复文件和超额旧图会被删除。历史数据库不随图片淘汰，不要删除历史目录，否则已淘汰图片可能再次被下载。
+## 安装与启动
 
-SFW 依据 Wallhaven 的分类标签，脚本无法保证社区没有误标。至少 4K 表示也接受 5120×2880、7680×4320 等严格 16:9 原图，不做放大或缩放。热门榜和网络供应有限，无法保证任意时刻都能找到足够的新图；脚本不会放宽 SFW、分类、分辨率或比例条件凑数。
-
-## 安装
-
-在 Arch 目标电脑上执行。只对安装系统依赖的命令使用 sudo；安装用户服务时使用普通用户。
+Arch Linux / EndeavourOS：
 
 ```bash
-sudo pacman -Syu --needed python python-pillow unzip
-unzip arch-anime-wallpapers.zip
-cd arch-anime-wallpapers
+sudo pacman -S --needed python python-pillow python-gobject gtk4 libadwaita
 bash install.sh
 ```
 
-安装脚本复制下载程序和两个 unit 文件，启用定时器，并异步启动首次补全。
-
-若要退出登录后继续运行，以及开机未登录时启动用户管理器：
+在应用菜单搜索 **栖景** 或 **Perch**，也可以执行：
 
 ```bash
-sudo loginctl enable-linger "$USER"
+~/.local/bin/perch
 ```
 
-这不会让关机的电脑下载，也不会主动唤醒休眠中的电脑。`Persistent=true` 会在定时器重新激活时，为错过的一个或多个计划时间补执行一次，不会逐次追补所有错过的任务。依赖用户登录才能解密/挂载的 home 目录还需等目录可用。
+要求 Python 3.11+、GTK 4.12+、libadwaita 1.4+、Pillow 和 PyGObject，以及 systemd 用户会话。其他发行版安装对应软件包后，同样运行 `bash install.sh`。安装不需要 root；桌面壁纸后端需要另行安装并运行。
 
-## 用户服务配置
-
-`~/.config/systemd/user/wallhaven-anime.service`（设置 XDG_CONFIG_HOME 时使用其下的 systemd/user）：
-
-```ini
-[Unit]
-Description=Download SFW anime 4K wallpapers and keep 20
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 %h/.local/bin/wallhaven-anime.py
-Environment=PYTHONUNBUFFERED=1
-TimeoutStartSec=45min
-UMask=0077
-Nice=10
-NoNewPrivileges=yes
-```
-
-`~/.config/systemd/user/wallhaven-anime.timer`：
-
-```ini
-[Unit]
-Description=Refresh anime wallpapers every six hours
-
-[Timer]
-OnCalendar=*-*-* 00,06,12,18:00:00
-Persistent=true
-AccuracySec=1min
-Unit=wallhaven-anime.service
-
-[Install]
-WantedBy=timers.target
-```
-
-下载程序安装在 `~/.local/bin/wallhaven-anime.py`。不设置 `RemainAfterExit=yes`，保证后续定时事件可以再次运行服务。没有给用户服务加 `network-online.target`：用户管理器里的同名 target 并不能保证系统网络已经可用，脚本在请求层重试网络错误。
-
-## 查看状态与手动执行
+也可直接从源码启动：
 
 ```bash
-# 首次填充进度；Ctrl+C 仅退出日志查看
-journalctl --user -u wallhaven-anime.service -f
-
-# 下次触发时间
-systemctl --user list-timers --all wallhaven-anime.timer
-
-# 最近执行结果
-systemctl --user status wallhaven-anime.service
-journalctl --user -u wallhaven-anime.service -n 80 --no-pager
-
-# 手动更新；已在运行时不会再启动一份
-systemctl --user start wallhaven-anime.service
+python3 -m perch
 ```
 
-oneshot 服务成功结束后显示 `inactive (dead)` 是正常的，以 `status=0/SUCCESS` 和日志为准。失败会显示 `failed`，定时器仍会在下个计划时间触发。HTTP 请求有间隔和有限重试，429 会退避；整个服务最多运行 45 分钟。
+保存全局设置时需要已安装后台服务。指定独立 `--config` 文件时只保存该文件，不操作系统定时器。
 
-## 修改保存位置或扫描范围
+### 从旧脚本迁移
+
+安装器会先备份旧安装，再短暂停止旧任务，更新程序并恢复定时器的启用状态。继续使用 `wallhaven-anime.service` / `.timer`，避免两套下载程序同时工作。旧版本的下载历史会直接读取，收藏表在原数据库中增量创建。
+
+- 图片与下载历史不搬移、不清空。
+- 原先已经启用的定时器继续启用，已经暂停的保持暂停。
+- 默认的 00:00 / 06:00 / 12:00 / 18:00 时间点保留；旧定时器的补执行选项会继承。
+- 自定义过旧定时器的用户，请安装后在 GUI 中重新设置时间点。
+- 若存在旧服务的自定义 `.service.d/*.conf`，安装器会停止并提示先处理，避免旧命令行覆盖 GUI 设置。
+- 原安装备份位于 `~/.local/state/perch/backups/<时间>/`，其中 `manifest.json` 记录每个原文件的备份位置；安装失败会自动恢复文件与定时器状态。
+
+## 更新计划怎么计算
+
+“时段内按间隔更新”以时段开始时间为基准，例如：
+
+| 设置 | 每天执行时间 |
+| --- | --- |
+| 08:00–23:00，每 4 小时 | 08:00、12:00、16:00、20:00 |
+| 22:00–04:00，每 2 小时 | 22:00、00:00、02:00、04:00 |
+| 固定时间点 | 按输入的 HH:MM 列表执行 |
+
+时间使用系统本地时区，实际触发精度为一分钟。时段限制的是**任务开始时间**，已经开始的下载可以继续到时段结束之后。开始与结束相同代表每天仅在这个时间点执行一次。
+
+新安装默认不补执行，避免登录后在时段外下载。开启“错过计划后补执行一次”会使用 systemd 的 `Persistent=true`，可能在所选时段外补跑一次。电脑关机时不会下载，也不会主动唤醒休眠设备；依赖用户会话的后台运行，如需退出登录后继续，可自行配置 `loginctl enable-linger`。
+
+## 收藏与清理规则
+
+仅管理当前目录中符合 `wallhaven-六位ID.jpg/png/webp` 的普通文件。其他文件、子目录和符号链接不会参与清理。
+
+1. 初次更新补满普通壁纸名额；正常更新新增指定数量。
+2. 新图片下载、校验并落盘成功后，才淘汰最早下载的超额普通壁纸。
+3. 收藏按 Wallhaven ID 保存在本机，始终排除在自动和手动清理之外。
+4. 取消收藏不会立即删除图片；它会在后续超额清理时按下载时间参与淘汰。
+5. 清理不会清空下载历史，已经下载并淘汰的 ID / 相同 SHA-256 内容不会重复下载。
+6. 修改尺寸筛选不会删除已有图片；已有的损坏图片也保留并记录警告。
+7. 网络失败或候选不足会记录原因。没有新图下载成功时，不会为了缩小保留数量提前删掉已有图片。
+
+收藏保护适用于栖景自身的清理，文件管理器或其他程序仍可删除图片。更改保存位置不会自动搬移原文件；所有目录共用这份下载历史和收藏记录。
+
+## 数据位置
+
+| 内容 | 默认位置 |
+| --- | --- |
+| 壁纸 | `~/Pictures/Wallpapers/` |
+| 设置 | `~/.config/perch/config.json` |
+| 下载历史与收藏 | `~/.local/state/wallhaven-anime/history.sqlite3` |
+| 日志 | `~/.local/state/wallhaven-anime/perch.log`，2 MB 轮转，保留两份旧日志 |
+| 缩略图缓存 | `~/.local/state/wallhaven-anime/thumbnails/` |
+| 应用程序 | `~/.local/share/perch/` |
+| 更新计划 | `~/.config/systemd/user/wallhaven-anime.timer.d/perch.conf` |
+
+配置和状态目录遵循 `XDG_CONFIG_HOME` / `XDG_STATE_HOME`，桌面入口遵循 `XDG_DATA_HOME`。程序与启动器使用固定的 `~/.local/share/perch`、`~/.local/bin`。
+
+## 命令行
 
 ```bash
-systemctl --user edit wallhaven-anime.service
+python3 -m perch update             # 手动下载，不需要打开 GUI
+python3 -m perch cleanup            # 仅预览超额清理
+python3 -m perch cleanup --apply    # 执行清理，收藏仍受保护
+python3 -m perch schedule           # 查看生成的定时器设置
+systemctl --user status wallhaven-anime.timer
+journalctl --user -u wallhaven-anime.service -n 50
 ```
 
-填入以下覆盖配置，例如保持保存到 `~/Pictures/Wallpapers`，将每个榜单的扫描上限改为 200 页：
+保留旧脚本入口 `wallhaven-anime.py`；`--directory`、`--state-directory`、`--max-pages` 仍可用于本次运行。
 
-```ini
-[Service]
-ExecStart=
-ExecStart=/usr/bin/python3 %h/.local/bin/wallhaven-anime.py --directory %h/Pictures/Wallpapers --max-pages 200
-```
+HTTP(S) 代理可通过标准环境变量设置。后台任务的代理需设置在用户服务环境中；GUI 所在终端的变量不一定会被 systemd 服务继承。
 
-路径包含空格时，将完整的路径参数用双引号括起来。更新后执行：
+## 开发与验证
 
 ```bash
-systemctl --user daemon-reload
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q perch
+bash -n install.sh
+# 需要图形会话；生成独立测试图库，不修改真实壁纸和定时器
+python3 tests/gui_smoke.py
 ```
 
-如果目标电脑需要 HTTP 代理，在同一个覆盖文件的 `[Service]` 下添加实际代理地址，例如 `Environment="HTTPS_PROXY=http://127.0.0.1:7890"`。该地址只作格式示例；代理需在服务运行时可用。脚本不会自动读取交互式终端的所有环境配置。
+测试覆盖收藏与清理、预览后的收藏变化、文件范围、旧历史兼容、首次补全、下载失败、内容去重、跨午夜计划、设置回滚和安装回滚。GUI 测试会验证图库、收藏、设置保存、时间预览、日志、搜索与图片预览，并把截图放在输出的 `/tmp/perch-gui-*` 目录。README 截图使用程序生成的几何图案，不包含下载的壁纸。
 
-要限制为恰好 3840×2160，可将脚本 `valid_size` 中的判断改成 `return (w, h) == (3840, 2160)`，并将请求中的 `atleast="3840x2160"` 改成 `resolutions="3840x2160"`。
+项目结构：`perch/gui.py` 是界面，`config.py` 管理设置，`library.py` 管理收藏和文件，`downloader.py` 下载与去重，`scheduler.py` 维护用户定时器。
 
-## 停用
+## 上传 GitHub
+
+仓库已使用 `main` 分支。先在 GitHub 建一个空仓库，再使用已配置的 SSH：
+
+```bash
+git remote add origin git@github.com:你的用户名/你的仓库名.git
+git push -u origin main
+```
+
+本项目不包含本机壁纸、数据库、账户凭据或私钥。软件采用 [MIT License](LICENSE)，下载壁纸的版权归各自作者，许可证不覆盖它们。
+
+## 停用与卸载
 
 ```bash
 systemctl --user disable --now wallhaven-anime.timer
-systemctl --user stop wallhaven-anime.service
+# 或卸载应用和定时服务，保留壁纸、收藏、历史、设置与安装备份
+bash uninstall.sh
 ```
 
-以上保留图片和历史数据。
+原脚本的使用说明保存在 [docs/legacy.md](docs/legacy.md)。
 
-## 核验记录与文档
-
-已验证 systemd unit 语法和每天四个触发时间，并用模拟数据验证首次填充、每次新增 3 张、删除后补全、历史 ID/SHA-256 去重、实际尺寸校验、损坏图片处理、断网时保留旧图和中断恢复。另对真实 API 查询和一张原图进行了下载校验。没有在你的系统中安装或启用这些服务。
-
-- Wallhaven API 文档：https://www.whvn.cc/help/api （说明中的接口地址为 wallhaven.cc；正确热门时间参数是 `topRange`）
-- systemd timer 文档：https://github.com/systemd/systemd/blob/main/man/systemd.timer.xml
-- loginctl linger 文档：https://github.com/systemd/systemd/blob/main/man/loginctl.xml
+参考：[Wallhaven API](https://www.whvn.cc/help/api)、[GTK4](https://docs.gtk.org/gtk4/)、[DMS 壁纸接口](https://danklinux.com/docs/dankmaterialshell/keybinds-ipc#wallpaper)。
