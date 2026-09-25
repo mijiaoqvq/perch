@@ -1,9 +1,13 @@
 """Optional GUI integration test. Uses isolated synthetic wallpapers; requires a display."""
 from pathlib import Path
+from dataclasses import replace
+import json
 import os
 import sys
 import tempfile
 import traceback
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
@@ -11,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from perch.config import Config, save, load
 from perch.library import Library
 from perch.gui import Application, GLib, Gtk
+from perch.downloader import replace_wallpaper
+from test_core import FakeClient
 
 root = Path(tempfile.mkdtemp(prefix='perch-gui-'))
 library = Library(root / 'images', root / 'state')
@@ -60,7 +66,9 @@ def capture(name):
     lib.gtk_snapshot_to_node.restype = ctypes.c_void_p
     node = lib.gtk_snapshot_to_node(ptr(snapshot))
     if not node:
-        raise RuntimeError('Window did not produce a render node')
+        widget.queue_draw()
+        widget.present()
+        return False
     renderer = widget.get_native().get_renderer()
     lib.gsk_renderer_render_texture.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     lib.gsk_renderer_render_texture.restype = ctypes.c_void_p
@@ -74,12 +82,31 @@ def capture(name):
     lib.g_object_unref.argtypes = [ctypes.c_void_p]
     lib.g_object_unref(texture)
     print('SCREENSHOT', destination, flush=True)
+    return True
 
 stage = 0
 attempts = 0
+preview = None
+disliked_id = None
+
+
+def fake_download(command, **kwargs):
+    assert command[3] == 'replace'
+    wid = command[command.index('--wallpaper-id') + 1]
+    candidates = ['next01'] if stage == 5 else ['next02'] if stage == 8 else []
+    try:
+        path = replace_wallpaper(replace(app.window.config, min_width=32, min_height=18),
+                                 library, wid, FakeClient(candidates, 'unique'))
+    except RuntimeError:
+        code = 1
+    else:
+        kwargs['stdout'].write(json.dumps({'path': str(path)}).encode())
+        kwargs['stdout'].flush()
+        code = 0
+    return SimpleNamespace(returncode=code, poll=lambda: code)
 
 def check():
-    global stage, attempts
+    global stage, attempts, preview, disliked_id
     attempts += 1
     if attempts > 50:
         raise AssertionError('GUI timed out')
@@ -89,7 +116,8 @@ def check():
     if stage == 0:
         assert len(win.items) == 9
         assert sum(i.favorite for i in win.items) == 2
-        capture('gallery')
+        if not capture('gallery'):
+            return True
         win.toggle_favorite(next(i for i in win.items if i.wid == 'demo08'))
         stage = 1
     elif stage == 1:
@@ -99,7 +127,8 @@ def check():
         assert win.page_name == 'favorites'
         stage = 2
     elif stage == 2:
-        capture('favorites')
+        if not capture('favorites'):
+            return True
         win.nav.select_row(win.nav.get_row_at_index(2))
         win.controls['active_start'].set_text('08:00')
         win.controls['active_end'].set_text('23:00')
@@ -111,25 +140,85 @@ def check():
         if load(root / 'config.json').keep != 8:
             return True
         assert load(root / 'config.json').slots() == ['08:00', '12:00', '16:00', '20:00']
-        capture('settings')
+        if not capture('settings'):
+            return True
         win.nav.select_row(win.nav.get_row_at_index(3))
         stage = 4
     elif stage == 4:
-        capture('activity')
+        if not capture('activity'):
+            return True
         win.nav.select_row(win.nav.get_row_at_index(0))
         win.search.set_text('missing')
         stage = 5
     elif stage == 5:
         assert win.gallery_stack.get_visible_child_name() == 'empty'
         win.search.set_text('')
-        win.preview(win.items[0])
+        item = next(i for i in win.items if not i.favorite)
+        disliked_id = item.wid
+        favorite = next(i for i in win.items if i.favorite)
+        assert not win.dislike_button(favorite).get_sensitive()
+        preview = win.preview(item)
+        # Exercise the real button and worker result handling using local fixtures.
+        app.demo = False
+        try:
+            with patch('perch.gui.subprocess.Popen', side_effect=fake_download):
+                win.dislike_button(item, preview).emit('clicked')
+        finally:
+            app.demo = True
+        assert not preview.get_child().get_sensitive()
         stage = 6
+    elif stage == 6:
+        win.poll()
+        if win.process or win.refresh_busy:
+            return True
+        assert not any(i.wid == disliked_id for i in win.items)
+        assert len(win.items) == 9
+        assert not preview.get_visible()
+        windows = [w for w in Gtk.Window.list_toplevels() if w.get_visible() and w.get_title() == 'NEXT01 · 栖景']
+        assert len(windows) == 1, 'Preview should automatically show the new wallpaper'
+        preview = windows[0]
+        item = next(i for i in win.items if i.wid == 'next01')
+        app.demo = False
+        try:
+            with patch('perch.gui.subprocess.Popen', side_effect=fake_download):
+                win.dislike_button(item, preview).emit('clicked')
+        finally:
+            app.demo = True
+        stage = 7
+    elif stage == 7:
+        win.poll()
+        if win.process or win.refresh_busy:
+            return True
+        assert preview.get_visible() and preview.get_child().get_sensitive()
+        assert next(i for i in win.items if i.wid == 'next01').disliked
+        assert len(win.items) == 9
+        preview.close()
+        stage = 8
+    elif stage == 8:
+        item = next(i for i in win.items if not i.favorite and not i.disliked)
+        preview = win.preview(item)
+        app.demo = False
+        try:
+            with patch('perch.gui.subprocess.Popen', side_effect=fake_download):
+                win.dislike_button(item, preview).emit('clicked')
+        finally:
+            app.demo = True
+        preview.close()
+        stage = 9
+    elif stage == 9:
+        win.poll()
+        if win.process or win.refresh_busy:
+            return True
+        assert any(i.wid == 'next02' for i in win.items)
+        assert not preview.get_visible()
+        assert not any(w.get_visible() and w.get_title() == 'NEXT02 · 栖景' for w in Gtk.Window.list_toplevels())
+        stage = 10
     else:
-        print('GUI PASS: gallery, favorite, navigation, settings save, schedule preview, logs, search, preview', flush=True)
+        print('GUI PASS: gallery, favorite, settings, logs, search, preview, dislike replacement, next preview, failed replacement', flush=True)
         app.quit()
         return False
     return True
 
 GLib.timeout_add(1200, check)
 app.run([])
-raise SystemExit(1 if errors or stage < 6 else 0)
+raise SystemExit(1 if errors or stage < 10 else 0)

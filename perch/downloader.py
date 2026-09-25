@@ -14,6 +14,7 @@ import urllib.request
 import warnings
 
 from PIL import Image
+from . import __version__
 
 MAX_BYTES = 100 * 1024 * 1024
 LOG = logging.getLogger("perch")
@@ -57,7 +58,7 @@ class Client:
             sink.seek(0)
             sink.truncate()
             req = urllib.request.Request(url, headers={
-                "User-Agent": "Perch/0.1 (Wallhaven wallpaper manager)",
+                "User-Agent": f"Perch/{__version__} (Wallhaven wallpaper manager)",
                 "Accept-Encoding": "identity",
             })
             try:
@@ -130,7 +131,10 @@ class Client:
 def reconcile(library):
     """Index existing images without deleting them, even after filter changes."""
     for item in library.items():
-        if library.seen(wid=item.wid):
+        # Newly disliked images must still have their content hash indexed.
+        with library.connect() as db:
+            indexed = db.execute("SELECT 1 FROM seen WHERE id=?", (item.wid,)).fetchone()
+        if indexed:
             continue
         try:
             digest, _ = inspect_image(item.path)
@@ -140,15 +144,33 @@ def reconcile(library):
 
 
 def update(config, library, client=None):
+    return _run(config, library, client)[0]
+
+
+def replace_wallpaper(config, library, wid, client=None):
+    """Replace exactly one selected wallpaper without pruning other images."""
+    if not isinstance(wid, str) or not re.fullmatch(r"[a-z0-9]{6}", wid):
+        raise ValueError("无效的壁纸 ID")
+    result, path = _run(config, library, client, replacement_id=wid)
+    if result:
+        raise RuntimeError("暂时没有下载到合适的新图，原图已保留；可点击重试或等待下次自动更新")
+    return path
+
+
+def _run(config, library, client=None, replacement_id=None):
     client = client or Client()
     # Same run.lock as the legacy worker, preventing overlap during migration.
-    with library.locked("run.lock", blocking=False):
+    if replacement_id:
+        LOG.info("准备替换 %s；如有更新任务，将等待其完成", replacement_id)
+    with library.locked("run.lock", blocking=bool(replacement_id)):
+        if replacement_id:
+            library.mark_disliked(replacement_id)
         for partial in library.directory.glob(".wallhaven-*.part"):
             if partial.is_file() or partial.is_symlink():
                 partial.unlink()
         reconcile(library)
         before = sum(not item.favorite for item in library.items())
-        required = max(config.batch, config.keep - before)
+        required = 1 if replacement_id else max(config.batch, config.keep - before)
         added = failures = 0
         LOG.info("开始更新 · 普通壁纸 %s 张 · 计划新增 %s 张", before, required)
         for item in client.candidates(config):
@@ -195,15 +217,23 @@ def update(config, library, client=None):
                 LOG.warning("下载 %s 失败：%s", wid, exc)
                 if failures >= 8:
                     raise RuntimeError("8 张图片下载失败，已停止本次更新") from exc
+                continue
             finally:
                 if temp_path is not None:
                     temp_path.unlink(missing_ok=True)
             # Never discard existing wallpapers before the first successful download.
             if added:
+                if replacement_id:
+                    if not library.finish_replacement(destination, replacement_id):
+                        raise RuntimeError("原图已收藏或状态发生变化，已保留新图并停止移除原图")
+                    LOG.info("不喜欢 · 已将 %s 替换为 %s，原图不再推荐", replacement_id, wid)
+                    return 0, destination
+                if library.finish_replacement(destination):
+                    LOG.info("已用新壁纸替换之前标记为不喜欢的图片")
                 for name in library.prune(config.keep):
                     LOG.info("清理旧壁纸：%s", name)
             if added >= required:
                 LOG.info("更新完成 · 新增 %s 张 · 收藏已保护", added)
-                return 0
+                return 0, None
         LOG.warning("候选不足 · 已新增 %s / %s 张，下次计划将继续尝试", added, required)
-        return 1
+        return 1, None

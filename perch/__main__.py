@@ -1,4 +1,5 @@
 import argparse
+import json
 from dataclasses import replace
 import logging
 from logging.handlers import RotatingFileHandler
@@ -11,7 +12,8 @@ from .library import Library
 
 def main():
     parser = argparse.ArgumentParser(description="栖景 · Perch — Wallhaven 壁纸管理")
-    parser.add_argument("command", nargs="?", choices=("gui", "update", "cleanup", "schedule"), default="gui")
+    parser.add_argument("command", nargs="?", choices=("gui", "update", "replace", "cleanup", "schedule"), default="gui")
+    parser.add_argument("--wallpaper-id", help="不喜欢并替换指定壁纸（用于 replace）")
     parser.add_argument("--config", type=Path, help="使用独立设置文件")
     parser.add_argument("--state-directory", type=Path, default=state_path())
     parser.add_argument("--directory", type=Path, help="本次运行使用的壁纸目录（兼容旧脚本）")
@@ -19,6 +21,8 @@ def main():
     parser.add_argument("--apply", action="store_true", help="实际清理；否则仅预览")
     parser.add_argument("--demo", action="store_true", help="独立预览模式，不操作桌面和系统定时器")
     args = parser.parse_args()
+    if args.command == "replace" and not args.wallpaper_id:
+        parser.error("replace 需要 --wallpaper-id")
     try:
         config = load(args.config)
         if args.directory:
@@ -46,6 +50,11 @@ def main():
             except BlockingIOError:
                 logging.getLogger("perch").info("已有更新任务正在执行")
                 return 0
+        if args.command == "replace":
+            from .downloader import replace_wallpaper
+            path = replace_wallpaper(config, library, args.wallpaper_id)
+            print(json.dumps({"path": str(path)}, ensure_ascii=False))
+            return 0
         if args.command == "cleanup":
             candidates = library.cleanup_candidates(config.keep)
             for item in candidates:

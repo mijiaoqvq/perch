@@ -1,10 +1,12 @@
 """Native GTK4 interface. Network and thumbnail work never runs on the UI thread."""
 from dataclasses import replace
 import hashlib
+import json
 import logging
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
 
 import gi
@@ -129,6 +131,9 @@ class PerchWindow(Adw.ApplicationWindow):
         self.thumbnails = {}
         self.page_name = "library"
         self.process = None
+        self.job_kind = None
+        self.job_output = None
+        self.replacement_preview = None
         self.status_busy = False
         self.refresh_busy = False
         self.library_signature = None
@@ -342,7 +347,7 @@ class PerchWindow(Adw.ApplicationWindow):
 
     @staticmethod
     def signature(items):
-        return tuple((str(i.path), i.modified, i.size, i.favorite) for i in items)
+        return tuple((str(i.path), i.modified, i.size, i.favorite, i.disliked) for i in items)
 
     def render_gallery(self):
         if not hasattr(self, "flow"):
@@ -385,20 +390,46 @@ class PerchWindow(Adw.ApplicationWindow):
             preview = button(action=lambda i=item: self.preview(i), css="thumbnail", tooltip="预览壁纸")
             preview.set_child(picture)
             card.append(preview)
-            footer = box(Gtk.Orientation.HORIZONTAL, 8, "card-footer")
-            texts = box(spacing=5)
-            texts.set_hexpand(True)
-            texts.append(label(item.wid.upper(), "card-id"))
-            texts.append(label(f"{width} × {height}  ·  {item.size / 1024**2:.1f} MB" if width else "无法读取图片", "caption"))
-            footer.append(texts)
+            footer = box(spacing=6, css="card-footer")
+            actions = box(Gtk.Orientation.HORIZONTAL, 5)
+            title = label(item.wid.upper(), "card-id")
+            title.set_hexpand(True)
+            actions.append(title)
+            metadata = (f"{width} × {height}  ·  {item.size / 1024**2:.1f} MB" if width else "无法读取图片")
+            actions.append(self.dislike_button(item))
             star = button(icon="starred-symbolic" if item.favorite else "non-starred-symbolic",
                           action=lambda i=item: self.toggle_favorite(i),
                           css="favorite" if item.favorite else "flat",
                           tooltip="取消收藏" if item.favorite else "收藏，保护此壁纸")
             star.set_valign(Gtk.Align.CENTER)
-            footer.append(star)
+            actions.append(star)
+            footer.append(actions)
+            footer.append(label("不喜欢 · 等待替换" if item.disliked else metadata, "caption"))
             card.append(footer)
             self.flow.append(card)
+
+    def dislike_button(self, item, preview=None):
+        tooltip = "先取消收藏，再点击不喜欢" if item.favorite else "不喜欢，换一张新壁纸"
+        if item.disliked:
+            tooltip = "原图已保留，点击重试换一张"
+        widget = button(text=("重试换一张" if item.disliked else "不喜欢") if preview else None,
+                        icon="view-refresh-symbolic" if item.disliked else "action-unavailable-symbolic",
+                        action=lambda: self.dislike(item, preview), css="flat", tooltip=tooltip)
+        widget.set_valign(Gtk.Align.CENTER)
+        widget.set_sensitive(not item.favorite and self.process is None)
+        return widget
+
+    def dislike(self, item, preview=None):
+        if item.favorite:
+            self.toast("请先取消收藏，再点击不喜欢")
+            return
+        if self.start_job("replace", ["--wallpaper-id", item.wid]):
+            self.replacement_preview = preview
+            self.render_gallery()
+            if preview:
+                preview.get_child().set_sensitive(False)
+                preview.set_title(f"正在换一张 · {item.wid.upper()} · 栖景")
+            self.toast("正在寻找一张新壁纸，下载成功后替换原图")
 
     def toggle_favorite(self, item):
         library = self.library
@@ -440,6 +471,7 @@ class PerchWindow(Adw.ApplicationWindow):
             win.close()
         star.connect("clicked", lambda *_: favorite())
         actions.append(star)
+        actions.append(self.dislike_button(item, win))
         spacer = box()
         spacer.set_hexpand(True)
         actions.append(spacer)
@@ -448,6 +480,7 @@ class PerchWindow(Adw.ApplicationWindow):
         root.append(actions)
         win.set_child(root)
         win.present()
+        return win
 
     def apply_wallpaper(self, item):
         if self.app.demo:
@@ -486,25 +519,36 @@ class PerchWindow(Adw.ApplicationWindow):
         dialog.present()
 
     def start_update(self):
+        if self.start_job("update"):
+            self.render_gallery()
+            self.toast("开始更新，进度可在「更新记录」查看")
+
+    def start_job(self, kind, extra=()):
         if self.app.demo:
             self.toast("预览模式不会下载真实壁纸")
-            return
-        if self.process and self.process.poll() is None:
-            return
-        command = [sys.executable, "-m", "perch", "update", "--state-directory", str(self.library.state),
-                   "--directory", str(self.library.directory)]
+            return False
+        if self.process is not None:
+            self.toast("正在下载，请等待本次任务完成")
+            return False
+        command = [sys.executable, "-m", "perch", kind, "--state-directory", str(self.library.state),
+                   "--directory", str(self.library.directory), *extra]
         if self.app.config_file:
             command.extend(["--config", str(self.app.config_file)])
         try:
+            # An anonymous file allows the worker to finish even after GUI exit.
+            output = tempfile.TemporaryFile()
             self.process = subprocess.Popen(command, cwd=Path(__file__).resolve().parent.parent,
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                            stdout=output, stderr=subprocess.DEVNULL,
                                             start_new_session=True)
         except OSError as exc:
+            if 'output' in locals():
+                output.close()
             self.toast(str(exc))
-            return
+            return False
+        self.job_output, self.job_kind = output, kind
         self.update_button.set_sensitive(False)
         self.update_button.set_tooltip_text("正在下载；关闭窗口后仍会继续")
-        self.toast("开始更新，进度可在「更新记录」查看")
+        return True
 
     def build_settings(self):
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
@@ -694,9 +738,32 @@ class PerchWindow(Adw.ApplicationWindow):
         if self.process and self.process.poll() is not None:
             code = self.process.returncode
             self.process = None
+            kind, self.job_kind = self.job_kind, None
+            preview, self.replacement_preview = self.replacement_preview, None
+            self.job_output.seek(0)
+            result = self.job_output.read()
+            self.job_output.close()
+            self.job_output = None
             self.update_button.set_sensitive(True)
             self.update_button.set_tooltip_text("下载新壁纸")
-            self.toast("更新完成" if code == 0 else "本次更新未完全完成，请查看更新记录")
+            if kind == "replace":
+                if preview and preview.get_visible():
+                    preview.get_child().set_sensitive(True)
+                    preview.set_title("壁纸预览 · 栖景")
+                if code == 0:
+                    self.toast("已换一张新壁纸，原图不再推荐")
+                    if preview and preview.get_visible():
+                        try:
+                            path = Path(json.loads(result)["path"])
+                            item = next(i for i in self.library.items() if i.path == path)
+                            preview.close()
+                            self.preview(item)
+                        except (ValueError, KeyError, StopIteration):
+                            self.toast("替换已完成，请在图库查看新壁纸")
+                else:
+                    self.toast("暂时无法换新图，原图已保留；可重试，详情见更新记录")
+            else:
+                self.toast("更新完成" if code == 0 else "本次更新未完全完成，请查看更新记录")
             self.refresh_library()
         if self.page_name == "activity":
             self.read_logs()
