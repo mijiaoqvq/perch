@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import warnings
+from . import colors
 
 from PIL import Image
 from . import __version__
@@ -48,9 +49,16 @@ def inspect_image(path, config=None):
     return digest, ext
 
 
+class PrivateAPIRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # An authenticated request must never forward its key to another URL.
+        raise urllib.error.URLError('已停止账户接口重定向，请稍后重试')
+
+
 class Client:
-    def __init__(self):
+    def __init__(self, api_key=''):
         self.last_request = 0.0
+        self.api_key = api_key
 
     def fetch(self, url, sink, limit):
         for attempt in range(3):
@@ -62,8 +70,14 @@ class Client:
                 "User-Agent": f"Perch/{__version__} (Wallhaven wallpaper manager)",
                 "Accept-Encoding": "identity",
             })
+            parsed = urllib.parse.urlsplit(url)
+            private = bool(self.api_key and parsed.scheme == 'https' and parsed.netloc == 'wallhaven.cc'
+                           and parsed.path.startswith('/api/v1/'))
+            if private:
+                req.add_header('X-API-Key', self.api_key)
+            open_url = urllib.request.build_opener(PrivateAPIRedirect()).open if private else urllib.request.urlopen
             try:
-                with urllib.request.urlopen(req, timeout=30) as response:
+                with open_url(req, timeout=30) as response:
                     length = response.headers.get("Content-Length")
                     if length and int(length) > limit:
                         raise ValueError("图片超过下载大小上限")
@@ -107,6 +121,8 @@ class Client:
                     params["topRange"] = top_range
                 if seed:
                     params["seed"] = seed
+                if config.color:
+                    params['colors'] = config.color
                 url = "https://wallhaven.cc/api/v1/search?" + urllib.parse.urlencode(params)
                 with tempfile.TemporaryFile() as response:
                     self.fetch(url, response, 4 * 1024 * 1024)
@@ -128,7 +144,7 @@ class Client:
                 if not result["data"] or page >= int(meta.get("last_page", page)):
                     break
 
-    def tags(self, wid):
+    def detail(self, wid):
         if not re.fullmatch(r"[a-z0-9]{6}", wid):
             raise ValueError("无效的壁纸 ID")
         with tempfile.TemporaryFile() as response:
@@ -138,7 +154,50 @@ class Client:
         item = result.get("data") if isinstance(result, dict) else None
         if not isinstance(item, dict) or item.get("id") != wid or not isinstance(item.get("tags"), list):
             raise ValueError("Wallhaven 返回了无法识别的标签数据")
-        return item["tags"]
+        return item
+
+    def tags(self, wid):
+        return self.detail(wid)['tags']
+
+    def api(self, path, params=None):
+        url = 'https://wallhaven.cc/api/v1/' + path
+        if params:
+            url += '?' + urllib.parse.urlencode(params)
+        with tempfile.TemporaryFile() as response:
+            self.fetch(url, response, 4 * 1024 * 1024)
+            response.seek(0)
+            result = json.load(response)
+        if not isinstance(result, dict) or not isinstance(result.get('data'), list):
+            raise ValueError('Wallhaven 返回了无法识别的收藏夹数据')
+        return result
+
+    def collections(self, username):
+        user = urllib.parse.quote(username, safe='')
+        return self.api('collections' if self.api_key else f'collections/{user}')['data']
+
+    def collection_items(self, username, collection):
+        user = urllib.parse.quote(username, safe='')
+        if not str(collection).isdigit():
+            raise ValueError('无效的收藏夹 ID')
+        path = f'collections/{user}/{collection}'
+        page, seen_pages = 1, set()
+        while True:
+            result = self.api(path, dict(page=page, purity='100'))
+            data = result['data']
+            if not data:
+                return
+            signature = tuple(str(item.get('id', '')) for item in data if isinstance(item, dict))
+            if signature in seen_pages:
+                raise ValueError('收藏夹分页重复，已保留已导入内容，请稍后重试')
+            seen_pages.add(signature)
+            yield from data
+            meta = result.get('meta') or {}
+            last = int(meta.get('last_page', page))
+            if page >= last:
+                return
+            if page >= 10000:
+                raise ValueError('收藏夹页数超过本次上限，已保留已导入内容')
+            page += 1
 
 
 def eligible(item, config):
@@ -205,6 +264,8 @@ def _run(config, library, client=None, replacement_id=None):
         LOG.info("开始更新 · 普通壁纸 %s 张 · 计划新增 %s 张", before, required)
         for item in recommended_candidates(config, library, client, fetcher, eligible):
             wid = item["id"]
+            if isinstance(item.get('colors'), list):
+                colors.save_palette(library, wid, item['colors'])
             url = item["path"]
             temp_path = None
             try:

@@ -52,8 +52,12 @@ class Config:
     wallpaper_backend: str = "auto"
     personalized: bool = True
     favorites_influence: bool = True
+    color: str = ""  # Also used by bounded personalised colour discovery queries.
 
     def validate(self):
+        from .colors import SEARCH_COLORS
+        if not isinstance(self.color, str) or (self.color and self.color not in SEARCH_COLORS):
+            raise ValueError("未知的 Wallhaven 搜索色调")
         for name, low, high in (("keep", 1, 10000), ("batch", 1, 100),
                                 ("interval_hours", 1, 24), ("max_pages", 1, 200),
                                 ("min_width", 1, 16384), ("min_height", 1, 16384)):

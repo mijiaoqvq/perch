@@ -43,6 +43,15 @@ class Library:
                        "mode TEXT NOT NULL CHECK(mode IN ('prefer', 'avoid', 'ignore')))")
             db.execute("CREATE TABLE IF NOT EXISTS spec_tag_overrides (name TEXT PRIMARY KEY, label TEXT NOT NULL, "
                        "enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)))")
+            # Preserve existing favourites when moving to favourite ⊆ liked.
+            db.execute("INSERT OR IGNORE INTO likes(id, created) SELECT id, created FROM favorites")
+            db.execute("CREATE TABLE IF NOT EXISTS wallpaper_colors (id TEXT PRIMARY KEY, colors TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS color_overrides (name TEXT PRIMARY KEY, mode TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS remote_likes (id TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE IF NOT EXISTS sync_exclusions (id TEXT PRIMARY KEY, "
+                       "like_blocked INTEGER DEFAULT 0, favorite_blocked INTEGER DEFAULT 0)")
+            db.execute("CREATE TABLE IF NOT EXISTS collection_imports (account TEXT, collection TEXT, id TEXT, "
+                       "mode INTEGER NOT NULL, PRIMARY KEY(account, collection, id))")
 
     @contextmanager
     def connect(self):
@@ -92,9 +101,13 @@ class Library:
                 if not any(item.wid == wid for item in self.items()):
                     raise FileNotFoundError("壁纸已被清理，请刷新图库")
                 db.execute("INSERT OR IGNORE INTO favorites(id) VALUES (?)", (wid,))
+                db.execute("INSERT OR IGNORE INTO likes(id) VALUES (?)", (wid,))
                 db.execute("DELETE FROM dislikes WHERE id=?", (wid,))
+                db.execute("DELETE FROM sync_exclusions WHERE id=?", (wid,))
             else:
                 db.execute("DELETE FROM favorites WHERE id=?", (wid,))
+                db.execute("INSERT INTO sync_exclusions(id, favorite_blocked) VALUES (?, 1) "
+                           "ON CONFLICT(id) DO UPDATE SET favorite_blocked=1", (wid,))
 
     def cleanup_candidates(self, keep):
         # Retain a disliked original until its replacement has been downloaded.
@@ -110,8 +123,12 @@ class Library:
                     raise FileNotFoundError("壁纸已被清理，请刷新图库")
                 db.execute("INSERT OR IGNORE INTO likes(id) VALUES (?)", (wid,))
                 db.execute("DELETE FROM dislikes WHERE id=?", (wid,))
+                db.execute("UPDATE sync_exclusions SET like_blocked=0 WHERE id=?", (wid,))
             else:
                 db.execute("DELETE FROM likes WHERE id=?", (wid,))
+                db.execute("DELETE FROM favorites WHERE id=?", (wid,))
+                db.execute("INSERT INTO sync_exclusions VALUES (?, 1, 1) "
+                           "ON CONFLICT(id) DO UPDATE SET like_blocked=1, favorite_blocked=1", (wid,))
 
     def mark_disliked(self, wid):
         with self.locked(), self.connect() as db:
@@ -126,7 +143,9 @@ class Library:
     def feedback(self, include_favorites=True):
         """Feedback survives image cleanup; a liked favourite counts only once."""
         with self.connect() as db:
-            values = {row[0]: 1 for row in db.execute("SELECT id FROM likes ORDER BY created, id")}
+            values = {row[0]: 1 for row in db.execute("SELECT id FROM remote_likes WHERE id NOT IN "
+                      "(SELECT id FROM sync_exclusions WHERE like_blocked=1)")}
+            values.update({row[0]: 1 for row in db.execute("SELECT id FROM likes ORDER BY created, id")})
             if include_favorites:
                 values.update({row[0]: 1 for row in db.execute("SELECT id FROM favorites ORDER BY created, id")})
             values.update({row[0]: -1 for row in db.execute("SELECT id FROM dislikes ORDER BY created, id")})

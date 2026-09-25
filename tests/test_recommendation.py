@@ -41,28 +41,27 @@ class FeedbackTests(TemporaryLibrary):
         self.assertEqual(self.library.feedback(), {'abcde0': 1})
         self.assertGreater(self.library.tag_profile()[0]['weight'], 0)
 
-    def test_like_and_favorite_are_independent(self):
+    def test_unlike_clears_favorite_and_unfavorite_keeps_like(self):
         self.image('abcde0')
         self.library.set_liked('abcde0', True)
         self.library.set_favorite('abcde0', True)
         self.library.save_tags('abcde0', tags(1))
         self.assertEqual(self.library.tag_profile()[0]['positive'], 1)
         self.library.set_liked('abcde0', False)
-        self.assertTrue(self.library.items()[0].favorite)
-        self.library.prune(0)
-        self.assertEqual(len(self.library.items()), 1)
+        self.assertFalse(self.library.items()[0].favorite)
+        self.assertTrue(self.library.items()[0].path.exists())
         self.library.set_liked('abcde0', True)
         self.library.set_favorite('abcde0', False)
         self.assertTrue(self.library.items()[0].liked)
         self.library.prune(0)
         self.assertEqual(len(self.library.items()), 0)
 
-    def test_favorites_can_be_excluded_from_personalization(self):
+    def test_favorite_always_includes_one_positive_like(self):
         self.image('abcde0')
         self.library.set_favorite('abcde0', True)
         self.library.save_tags('abcde0', tags(1))
-        self.assertEqual(self.library.feedback(False), {})
-        self.assertEqual(self.library.tag_profile(False), [])
+        self.assertEqual(self.library.feedback(False), {"abcde0": 1})
+        self.assertEqual(self.library.tag_profile(False)[0]["positive"], 1)
         self.assertTrue(self.library.items()[0].favorite)
 
     def test_dislike_replaces_positive_feedback_and_like_can_undo_it(self):
@@ -79,12 +78,14 @@ class FeedbackTests(TemporaryLibrary):
         self.library.set_liked('abcde0', False)
         self.assertEqual(self.library.tag_profile(), [])
 
-    def test_old_favorites_stay_protected_without_becoming_likes(self):
+    def test_old_favorites_migrate_to_likes_and_remain_protected(self):
         self.image('abcde0')
         self.library.set_favorite('abcde0', True)
+        with self.library.connect() as db:
+            db.execute('DELETE FROM likes')  # Simulate a pre-0.7 favourite.
         reopened = Library(self.library.directory, self.library.state)
         self.assertTrue(reopened.items()[0].favorite)
-        self.assertFalse(reopened.items()[0].liked)
+        self.assertTrue(reopened.items()[0].liked)
         reopened.prune(0)
         self.assertEqual(len(reopened.items()), 1)
 

@@ -12,7 +12,7 @@ from .library import Library
 
 def main():
     parser = argparse.ArgumentParser(description="栖景 · Perch — Wallhaven 壁纸管理")
-    parser.add_argument("command", nargs="?", choices=("gui", "update", "replace", "cleanup", "schedule", "sync-tags"), default="gui")
+    parser.add_argument("command", nargs="?", choices=("gui", "update", "replace", "cleanup", "schedule", "sync-tags", "sync-collections"), default="gui")
     parser.add_argument("--wallpaper-id", help="不喜欢并替换指定壁纸（用于 replace）")
     parser.add_argument("--config", type=Path, help="使用独立设置文件")
     parser.add_argument("--state-directory", type=Path, default=state_path())
@@ -45,11 +45,30 @@ def main():
             return Application(config, library, args.config, args.demo).run([])
         if args.command == "update":
             from .downloader import update
+            from .accounts import load_account, account_path, sync_collections, friendly_error
             try:
+                try:
+                    account = load_account(account_path(args.config))
+                    if account.automatic and account.username:
+                        sync_collections(config, library, account)
+                except BlockingIOError:
+                    raise
+                except Exception as exc:
+                    logging.getLogger('perch').warning('收藏夹同步暂未完成，继续普通更新：%s', friendly_error(exc))
                 return update(config, library)
             except BlockingIOError:
                 logging.getLogger("perch").info("已有更新任务正在执行")
                 return 0
+        if args.command == 'sync-collections':
+            from .accounts import load_account, account_path, sync_collections, friendly_error
+            try:
+                result = sync_collections(config, library, load_account(account_path(args.config)))
+            except Exception as exc:
+                logging.getLogger('perch').warning('收藏夹同步尚未完成：%s；已导入内容已保留',
+                                                  '已有下载或同步任务，请稍后重试' if isinstance(exc, BlockingIOError) else friendly_error(exc))
+                return 1
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         if args.command == "replace":
             from .downloader import replace_wallpaper
             path = replace_wallpaper(config, library, args.wallpaper_id)
@@ -57,11 +76,12 @@ def main():
             return 0
         if args.command == "sync-tags":
             from .downloader import Client
+            from . import colors
             from .recommendation import TagFetcher, sync_feedback
             fetcher = TagFetcher(library, Client())
             synced = sync_feedback(config, library, fetcher)
-            pending = sum(library.tags_for(wid) is None for wid in library.feedback(config.favorites_influence))
-            print(f"已同步 {synced} 张反馈壁纸的标签；{pending} 张待后续同步")
+            pending = sum(library.tags_for(wid) is None or colors.palette(library, wid) is None for wid in library.feedback())
+            print(f"已同步 {synced} 张反馈壁纸的标签与色调；{pending} 张待后续同步")
             return 1 if fetcher.unavailable else 0
         if args.command == "cleanup":
             candidates = library.cleanup_candidates(config.keep)

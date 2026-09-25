@@ -52,41 +52,11 @@ def excepthook(kind, value, tb):
 sys.excepthook = excepthook
 
 
+from gui_support import capture_widget
+
 def capture(name, widget=None):
-    # Use the native GTK renderer to capture only this application window.
-    import ctypes
-    import ctypes.util
-    from gi.repository import Gsk, Graphene
-    widget = widget or app.window
-    snapshot = Gtk.Snapshot()
-    paintable = Gtk.WidgetPaintable.new(widget)
-    paintable.snapshot(snapshot, widget.get_width(), widget.get_height())
-    lib = ctypes.CDLL(ctypes.util.find_library('gtk-4'))
-    capsule = ctypes.pythonapi.PyCapsule_GetPointer
-    capsule.argtypes = [ctypes.py_object, ctypes.c_char_p]
-    capsule.restype = ctypes.c_void_p
-    ptr = lambda obj: capsule(obj.__gpointer__, None)
-    lib.gtk_snapshot_to_node.argtypes = [ctypes.c_void_p]
-    lib.gtk_snapshot_to_node.restype = ctypes.c_void_p
-    node = lib.gtk_snapshot_to_node(ptr(snapshot))
-    if not node:
-        widget.queue_draw()
-        widget.present()
-        return False
-    renderer = widget.get_native().get_renderer()
-    lib.gsk_renderer_render_texture.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
-    lib.gsk_renderer_render_texture.restype = ctypes.c_void_p
-    texture = lib.gsk_renderer_render_texture(ptr(renderer), node, None)
-    lib.gdk_texture_save_to_png.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-    lib.gdk_texture_save_to_png.restype = ctypes.c_bool
-    destination = root / f'{name}.png'
-    assert lib.gdk_texture_save_to_png(texture, str(destination).encode())
-    lib.gsk_render_node_unref.argtypes = [ctypes.c_void_p]
-    lib.gsk_render_node_unref(node)
-    lib.g_object_unref.argtypes = [ctypes.c_void_p]
-    lib.g_object_unref(texture)
-    print('SCREENSHOT', destination, flush=True)
-    return True
+    return capture_widget(root / f'{name}.png', widget or app.window)
+
 
 stage = 0
 attempts = 0
@@ -279,26 +249,31 @@ def check():
         stage = 13
     elif stage == 13:
         item = next(i for i in win.items if i.wid == 'demo01')
-        if not item.liked:
+        if item.liked:
             return True
-        assert item.favorite
+        assert not item.favorite
+        assert item.path.exists()
+        win.toggle_favorite(item)
+        stage = 13.5
+    elif stage == 13.5:
+        item = next(i for i in win.items if i.wid == 'demo01')
+        if not item.favorite:
+            return True
         win.like_button(item).emit('clicked')
         stage = 14
     elif stage == 14:
         item = next(i for i in win.items if i.wid == 'demo01')
         if item.liked:
             return True
-        assert item.favorite
+        assert not item.favorite
         navigate('settings')
         win.controls['personalized'].set_active(False)
-        win.controls['favorites_influence'].set_active(False)
         win.save_settings()
         stage = 15
     elif stage == 15:
         saved = load(root / 'config.json')
         if saved.personalized:
             return True
-        assert not saved.favorites_influence
         assert 'sky' in win.tag_widgets
         win.show_tag_manager()
         assert win.page_name == 'likes'
@@ -364,7 +339,7 @@ def check():
     elif stage == 24:
         if not capture('tag-preferences'):
             return True
-        assert library.favorite_ids() == {'demo01', 'demo04', 'demo08'}
+        assert library.favorite_ids() == {'demo04', 'demo08'}
         # Exercise the motion-controller path: hover opens the card after a delay.
         win.tag_widgets['sky']['chip'].motion.emit('enter', 10.0, 10.0)
         stage = 25
