@@ -152,6 +152,79 @@ class DislikeTests(TemporaryLibrary):
             self.assertEqual(main(), 0)
         self.assertEqual(json.loads(output.getvalue())['path'], str(self.library.directory / 'wallhaven-abcde1.png'))
 
+    def test_queued_images_are_protected_and_each_replaced_once(self):
+        originals = [self.image('abcde0', 'red'), self.image('abcde1', 'green')]
+        probe = self.image('probe0', 'yellow')
+        marked = {wid: threading.Event() for wid in ('abcde0', 'abcde1')}
+        original_mark = self.library.mark_disliked
+        def mark(wid):
+            original_mark(wid)
+            marked[wid].set()
+        results, errors = [], []
+        def run(wid, new):
+            try:
+                results.append(replace_wallpaper(self.config, self.library, wid, FakeClient([new], 'unique')))
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(self.library, 'mark_disliked', side_effect=mark), self.library.locked('run.lock'):
+            workers = [threading.Thread(target=run, args=(f'abcde{i}', f'fresh{i}'), daemon=True) for i in range(2)]
+            for worker in workers:
+                worker.start()
+            for event in marked.values():
+                self.assertTrue(event.wait(2))
+            self.assertTrue(all(self.library.replacement_pending(wid) for wid in marked))
+            self.assertEqual(self.library.feedback(), {'abcde0': -1, 'abcde1': -1})
+            # A regular updater cannot consume a queued replacement or prune its original.
+            self.assertFalse(self.library.finish_replacement(probe))
+            self.library.prune(1)
+            self.assertTrue(all(path.exists() for path in originals))
+        for worker in workers:
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual({path.name for path in results}, {'wallhaven-fresh0.png', 'wallhaven-fresh1.png'})
+        self.assertTrue(all(not path.exists() for path in originals))
+        self.assertTrue(probe.exists())
+
+    def test_duplicate_worker_is_rejected_without_downloading(self):
+        original = self.image('abcde0')
+        client = FakeClient(['fresh0'])
+        with self.library.locked('replace-abcde0.lock'), patch.object(client, 'fetch') as download:
+            with self.assertRaises(BlockingIOError):
+                replace_wallpaper(self.config, self.library, 'abcde0', client)
+            download.assert_not_called()
+        self.assertTrue(original.exists())
+        self.assertFalse(self.library.replacement_pending('abcde0'))
+        self.assertTrue(replace_wallpaper(self.config, self.library, 'abcde0', client).exists())
+
+    def test_new_like_while_waiting_cancels_queued_replacement(self):
+        original = self.image('abcde0')
+        marked = threading.Event()
+        original_mark = self.library.mark_disliked
+        errors = []
+        client = FakeClient(['fresh0'])
+        def mark(wid):
+            original_mark(wid)
+            marked.set()
+        def run():
+            try:
+                replace_wallpaper(self.config, self.library, 'abcde0', client)
+            except Exception as exc:
+                errors.append(exc)
+        with patch.object(self.library, 'mark_disliked', side_effect=mark), self.library.locked('run.lock'), \
+             patch.object(client, 'fetch') as download:
+            worker = threading.Thread(target=run, daemon=True)
+            worker.start()
+            self.assertTrue(marked.wait(2))
+            self.library.set_liked('abcde0', True)
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIn('反馈已修改', str(errors[0]))
+        download.assert_not_called()
+        self.assertTrue(original.exists())
+        self.assertEqual(self.library.feedback(), {'abcde0': 1})
+
 
 if __name__ == '__main__':
     unittest.main()

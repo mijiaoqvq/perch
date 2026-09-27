@@ -76,6 +76,14 @@ class Library:
         with self.connect() as db:
             return {row[0] for row in db.execute("SELECT id FROM favorites")}
 
+    def replacement_pending(self, wid):
+        """The detached worker holds this lock even while waiting to download."""
+        try:
+            with self.locked(f"replace-{wid}.lock", blocking=False):
+                return False
+        except BlockingIOError:
+            return True
+
     def items(self):
         favorites = self.favorite_ids()
         with self.connect() as db:
@@ -281,7 +289,7 @@ class Library:
                 raise ValueError("新壁纸尚未保存，保留原图")
             candidates = [item for item in self.items()
                           if item.disliked and not item.favorite and item.path != replacement
-                          and (wid is None or item.wid == wid)]
+                          and (item.wid == wid if wid is not None else not self.replacement_pending(item.wid))]
             if not candidates:
                 return False
             active = current_wallpapers(backend)

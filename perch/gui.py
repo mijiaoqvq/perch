@@ -155,7 +155,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.process = None
         self.job_kind = None
         self.job_output = None
-        self.replacement_preview = None
+        self.replacement_jobs = {}
         self.tag_sync_busy = False
         self.tag_sync_requested = False
         self.tag_sync_pending = set()
@@ -695,7 +695,8 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
             if item.liked:
                 actions.append(star)
             footer.append(actions)
-            footer.append(label("不喜欢 · 等待替换" if item.disliked else metadata, "caption"))
+            status = "已提交 · 等待换新" if item.wid in self.replacement_jobs else ("不喜欢 · 等待替换" if item.disliked else metadata)
+            footer.append(label(status, "caption"))
             card.append(footer)
             self.flow.append(card)
 
@@ -729,14 +730,17 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.task(lambda: library.set_liked(item.wid, not item.liked), done)
 
     def dislike_button(self, item, preview=None):
+        pending = item.wid in self.replacement_jobs
         tooltip = "先取消收藏，再点击不喜欢" if item.favorite else "不喜欢，换一张新壁纸"
         if item.disliked:
             tooltip = "原图已保留，点击重试换一张"
-        widget = button(text=("重试换一张" if item.disliked else "不喜欢") if preview else None,
-                        icon="view-refresh-symbolic" if item.disliked else "action-unavailable-symbolic",
+        if pending:
+            tooltip = "这张已提交换图；可以继续标记其他壁纸"
+        widget = button(text=("等待换新" if pending else "重试换一张" if item.disliked else "不喜欢") if preview else None,
+                        icon="view-refresh-symbolic" if pending or item.disliked else "action-unavailable-symbolic",
                         action=lambda: self.dislike(item, preview), css="flat", tooltip=tooltip)
         widget.set_valign(Gtk.Align.CENTER)
-        widget.set_sensitive(not item.favorite and self.process is None)
+        widget.set_sensitive(not item.favorite and not pending)
         return widget
 
     def dislike(self, item, preview=None):
@@ -744,12 +748,12 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
             self.toast("请先取消收藏，再点击不喜欢")
             return
         if self.start_job("replace", ["--wallpaper-id", item.wid]):
-            self.replacement_preview = preview
+            self.replacement_jobs[item.wid]['preview'] = preview
             self.render_gallery()
             if preview:
                 preview.get_child().set_sensitive(False)
-                preview.set_title(f"正在换一张 · {item.wid.upper()} · 栖景")
-            self.toast("正在寻找一张新壁纸，下载成功后替换原图")
+                preview.set_title(f"等待换新 · {item.wid.upper()} · 栖景")
+            self.toast(f"已提交换图 · {len(self.replacement_jobs)} 张处理中，可继续标记其他壁纸")
 
     def toggle_favorite(self, item):
         library = self.library
@@ -796,7 +800,8 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         if item.liked:
             actions.append(star)
         actions.append(self.like_button(item, win))
-        actions.append(self.dislike_button(item, win))
+        win.dislike_action = self.dislike_button(item, win)
+        actions.append(win.dislike_action)
         spacer = box()
         spacer.set_hexpand(True)
         actions.append(spacer)
@@ -815,6 +820,10 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         root.append(tags_row)
         root.append(actions)
         win.set_child(root)
+        if item.wid in self.replacement_jobs:
+            self.replacement_jobs[item.wid]['preview'] = win
+            root.set_sensitive(False)
+            win.set_title(f"等待换新 · {item.wid.upper()} · 栖景")
         win.present()
         return win
 
@@ -950,7 +959,11 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         if self.app.demo:
             self.toast("预览模式不会下载真实壁纸")
             return False
-        if self.process is not None:
+        wid = extra[extra.index('--wallpaper-id') + 1] if kind == 'replace' else None
+        if wid in self.replacement_jobs:
+            self.toast("这张壁纸已提交换图，可以继续标记其他壁纸")
+            return False
+        if kind != 'replace' and self.jobs_busy():
             self.toast("正在下载，请等待本次任务完成")
             return False
         command = [sys.executable, "-m", "perch", kind, "--state-directory", str(self.library.state),
@@ -960,18 +973,32 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         try:
             # An anonymous file allows the worker to finish even after GUI exit.
             output = tempfile.TemporaryFile()
-            self.process = subprocess.Popen(command, cwd=Path(__file__).resolve().parent.parent,
-                                            stdout=output, stderr=subprocess.DEVNULL,
-                                            start_new_session=True)
+            process = subprocess.Popen(command, cwd=Path(__file__).resolve().parent.parent,
+                                       stdout=output, stderr=subprocess.DEVNULL,
+                                       start_new_session=True)
         except OSError as exc:
             if 'output' in locals():
                 output.close()
             self.toast(str(exc))
             return False
-        self.job_output, self.job_kind = output, kind
-        self.update_button.set_sensitive(False)
-        self.update_button.set_tooltip_text("正在下载；关闭窗口后仍会继续")
+        if kind == 'replace':
+            # Submit every image now. Workers wait on run.lock, so the entire
+            # queue survives closing the GUI without concurrent downloads.
+            self.replacement_jobs[wid] = dict(process=process, output=output, preview=None)
+        else:
+            self.process = process
+            self.job_output, self.job_kind = output, kind
+        self.refresh_job_controls()
         return True
+
+    def jobs_busy(self):
+        return self.process is not None or bool(self.replacement_jobs)
+
+    def refresh_job_controls(self):
+        self.update_button.set_sensitive(not self.jobs_busy())
+        self.update_button.set_tooltip_text(
+            f"{len(self.replacement_jobs)} 张壁纸等待换新；关闭窗口后仍会继续" if self.replacement_jobs
+            else "正在下载；关闭窗口后仍会继续" if self.process else "下载新壁纸")
 
     def build_settings(self):
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
@@ -1116,7 +1143,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         except ValueError as exc:
             self.toast(str(exc))
             return
-        if self.process and self.process.poll() is None:
+        if self.jobs_busy():
             self.toast("请等待本次更新结束后再保存设置")
             return
         self.save_button.set_sensitive(False)
@@ -1167,34 +1194,26 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
     def poll(self):
         if self.closed:
             return GLib.SOURCE_REMOVE
+        completed = False
+        for wid, job in list(self.replacement_jobs.items()):
+            if job['process'].poll() is None:
+                continue
+            del self.replacement_jobs[wid]
+            output = job['output']
+            output.seek(0)
+            result = output.read()
+            output.close()
+            self.finish_replacement_job(wid, job['process'].returncode, result, job['preview'])
+            completed = True
         if self.process and self.process.poll() is not None:
             code = self.process.returncode
             self.process = None
             kind, self.job_kind = self.job_kind, None
-            preview, self.replacement_preview = self.replacement_preview, None
             self.job_output.seek(0)
             result = self.job_output.read()
             self.job_output.close()
             self.job_output = None
-            self.update_button.set_sensitive(True)
-            self.update_button.set_tooltip_text("下载新壁纸")
-            if kind == "replace":
-                if preview and preview.get_visible():
-                    preview.get_child().set_sensitive(True)
-                    preview.set_title("壁纸预览 · 栖景")
-                if code == 0:
-                    self.toast("已换一张新壁纸，原图不再推荐")
-                    if preview and preview.get_visible():
-                        try:
-                            path = Path(json.loads(result)["path"])
-                            item = next(i for i in self.library.items() if i.path == path)
-                            preview.close()
-                            self.preview(item)
-                        except (ValueError, KeyError, StopIteration):
-                            self.toast("替换已完成，请在图库查看新壁纸")
-                else:
-                    self.toast("暂时无法换新图，原图已保留；可重试，详情见更新记录")
-            elif kind == 'sync-collections':
+            if kind == 'sync-collections':
                 if code == 0:
                     try:
                         stats = json.loads(result)
@@ -1208,6 +1227,10 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
                     self.account_status.set_text(message)
             else:
                 self.toast("更新完成" if code == 0 else "本次更新未完全完成，请查看更新记录")
+            completed = True
+        if completed:
+            self.refresh_job_controls()
+            self.render_gallery()
             self.refresh_library()
             self.refresh_profile()
         if self.page_name == "activity":
@@ -1230,3 +1253,28 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
                         self.refresh_library()
             self.task(work, done)
         return GLib.SOURCE_CONTINUE
+
+    def finish_replacement_job(self, wid, code, result, preview):
+        if preview and preview.get_visible():
+            preview.get_child().set_sensitive(True)
+            preview.set_title(f"{wid.upper()} · 栖景")
+        if code != 0:
+            if preview and preview.get_visible():
+                item = next((item for item in self.library.items() if item.wid == wid), None)
+                if item:
+                    old = preview.dislike_action
+                    parent = old.get_parent()
+                    preview.dislike_action = self.dislike_button(item, preview)
+                    parent.insert_child_after(preview.dislike_action, old)
+                    parent.remove(old)
+            self.toast(f"{wid.upper()} 暂未换新，原图已保留；其他换图任务继续，可稍后重试")
+            return
+        self.toast(f"{wid.upper()} 已换成新壁纸，原图不再推荐")
+        if preview and preview.get_visible():
+            try:
+                path = Path(json.loads(result)["path"])
+                item = next(i for i in self.library.items() if i.path == path)
+                preview.close()
+                self.preview(item)
+            except (ValueError, KeyError, StopIteration):
+                self.toast("替换已完成，请在图库查看新壁纸")

@@ -238,7 +238,11 @@ def replace_wallpaper(config, library, wid, client=None):
     """Replace exactly one selected wallpaper without pruning other images."""
     if not isinstance(wid, str) or not re.fullmatch(r"[a-z0-9]{6}", wid):
         raise ValueError("无效的壁纸 ID")
-    result, path = _run(config, library, client, replacement_id=wid)
+    # A reopened GUI or a second caller must not enqueue the same image twice.
+    with library.locked(f"replace-{wid}.lock", blocking=False):
+        # Save feedback before waiting; normal retention must not remove queued images.
+        library.mark_disliked(wid)
+        result, path = _run(config, library, client, replacement_id=wid)
     if result:
         raise RuntimeError("暂时没有下载到合适的新图，原图已保留；可点击重试或等待下次自动更新")
     return path
@@ -252,7 +256,9 @@ def _run(config, library, client=None, replacement_id=None):
         LOG.info("准备替换 %s；如有更新任务，将等待其完成", replacement_id)
     with library.locked("run.lock", blocking=bool(replacement_id)):
         if replacement_id:
-            library.mark_disliked(replacement_id)
+            original = next((item for item in library.items() if item.wid == replacement_id), None)
+            if original is None or original.favorite or not original.disliked:
+                raise RuntimeError("原图已收藏、反馈已修改或已不在图库，已停止这张换图任务")
             fetcher.get(replacement_id)
         for partial in library.directory.glob(".wallhaven-*.part"):
             if partial.is_file() or partial.is_symlink():
