@@ -6,6 +6,7 @@ import fcntl
 import re
 import sqlite3
 import time
+from .desktop import current_wallpapers
 from .tag_policy import DEFAULT_SPEC_TAGS, SpecPolicy, is_spec_tag, tag_key, validate_tag_name
 
 NAME = re.compile(r"wallhaven-([a-z0-9]{6})\.(jpg|png|webp)\Z")
@@ -109,10 +110,14 @@ class Library:
                 db.execute("INSERT INTO sync_exclusions(id, favorite_blocked) VALUES (?, 1) "
                            "ON CONFLICT(id) DO UPDATE SET favorite_blocked=1", (wid,))
 
-    def cleanup_candidates(self, keep):
+    def cleanup_candidates(self, keep, backend='auto'):
         # Retain a disliked original until its replacement has been downloaded.
         ordinary = [item for item in self.items() if not item.favorite and not item.disliked]
-        return ordinary[keep:]
+        if not ordinary[keep:]:
+            return []
+        active = current_wallpapers(backend)
+        # Keep the original retention cutoff; never delete a newer file in its place.
+        return [item for item in ordinary[keep:] if item.path.resolve() not in active]
 
     def set_liked(self, wid, value):
         if not re.fullmatch(r"[a-z0-9]{6}", wid):
@@ -267,7 +272,7 @@ class Library:
         return sorted((tag for tag in counts.values() if include_specs or not tag["technical"]),
                       key=lambda tag: (-tag["weight"], tag["key"]))
 
-    def finish_replacement(self, replacement, wid=None):
+    def finish_replacement(self, replacement, wid=None, backend='auto'):
         """Remove only a disliked original, after the new file is safely installed."""
         replacement = Path(replacement)
         with self.locked():
@@ -279,20 +284,30 @@ class Library:
                           and (wid is None or item.wid == wid)]
             if not candidates:
                 return False
+            active = current_wallpapers(backend)
+            candidates = [item for item in candidates if item.path.resolve() not in active]
+            if not candidates:
+                return False
             selected_id = candidates[-1].wid
             for item in candidates:
                 if item.wid == selected_id and not item.path.is_symlink():
+                    if item.path.resolve() in current_wallpapers(backend):
+                        return False
                     item.path.unlink(missing_ok=True)
             return True
 
-    def prune(self, keep, approved=None):
+    def prune(self, keep, approved=None, backend='auto'):
         """Only delete current excess files; optionally intersect a reviewed list."""
         removed = []
         with self.locked():
-            for item in self.cleanup_candidates(keep):
+            for item in self.cleanup_candidates(keep, backend):
                 if approved is not None and item.path.name not in approved:
                     continue
                 if item.path.is_symlink():
+                    continue
+                # Re-read after confirmation and before each unlink; desktop cycling
+                # may have selected another image since the preview or last deletion.
+                if item.path.resolve() in current_wallpapers(backend):
                     continue
                 item.path.unlink(missing_ok=True)
                 removed.append(item.path.name)

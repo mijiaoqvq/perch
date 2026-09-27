@@ -302,13 +302,13 @@ def _run(config, library, client=None, replacement_id=None):
             if added:
                 fetcher.get(wid)
                 if replacement_id:
-                    if not library.finish_replacement(destination, replacement_id):
-                        raise RuntimeError("原图已收藏或状态发生变化，已保留新图并停止移除原图")
+                    if not library.finish_replacement(destination, replacement_id, config.wallpaper_backend):
+                        raise RuntimeError("原图已收藏、正被桌面使用或状态发生变化；新图和原图均已保留")
                     LOG.info("不喜欢 · 已将 %s 替换为 %s，原图不再推荐", replacement_id, wid)
                     return 0, destination
-                if library.finish_replacement(destination):
+                if library.finish_replacement(destination, backend=config.wallpaper_backend):
                     LOG.info("已用新壁纸替换之前标记为不喜欢的图片")
-                for name in library.prune(config.keep):
+                for name in library.prune(config.keep, backend=config.wallpaper_backend):
                     LOG.info("清理旧壁纸：%s", name)
             if added >= required:
                 LOG.info("更新完成 · 新增 %s 张 · 收藏已保护", added)

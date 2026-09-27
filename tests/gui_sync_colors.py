@@ -178,6 +178,7 @@ def check():
 
 
 GLib.timeout_add(900, check)
-with patch('perch.accounts.Client', return_value=CollectionClient()):
+with patch('perch.accounts.Client', return_value=CollectionClient()), \
+     patch('perch.library.current_wallpapers', return_value=set()):
     app.run([])
 raise SystemExit(1 if errors or stage < 12 else 0)

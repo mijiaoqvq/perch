@@ -904,9 +904,19 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.task(work, done)
 
     def preview_cleanup(self):
-        candidates = self.library.cleanup_candidates(self.config.keep)
+        if getattr(self, 'cleanup_preview_busy', False):
+            return
+        self.cleanup_preview_busy = True
+        library, keep, backend = self.library, self.config.keep, self.config.wallpaper_backend
+        def done(candidates, error):
+            self.cleanup_preview_busy = False
+            if not error and library is self.library:
+                self.show_cleanup_preview(candidates, library, keep, backend)
+        self.task(lambda: library.cleanup_candidates(keep, backend), done)
+
+    def show_cleanup_preview(self, candidates, library, keep, backend):
         if not candidates:
-            self.toast("目前没有超额的普通壁纸，无需清理")
+            self.toast("没有可清理的超额壁纸；收藏和当前桌面壁纸已排除")
             return
         names = {item.path.name for item in candidates}
         size = sum(item.size for item in candidates) / 1024**2
@@ -914,21 +924,20 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         if len(candidates) > 8:
             listing += f"\n…以及另外 {len(candidates) - 8} 张"
         dialog = Adw.MessageDialog(transient_for=self, heading=f"清理 {len(candidates)} 张旧壁纸？",
-                                  body=f"将释放约 {size:.1f} MB，保留最新 {self.config.keep} 张普通壁纸。收藏全部保留。删除无法撤销。\n\n{listing}")
+                                  body=f"将释放约 {size:.1f} MB，保留最新 {keep} 张普通壁纸。收藏和当前桌面壁纸全部保留；删除前会再次核对。删除无法撤销。\n\n{listing}")
         dialog.add_response("cancel", "取消")
         dialog.add_response("clean", "清理这些壁纸")
         dialog.set_response_appearance("clean", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
-        library, keep = self.library, self.config.keep
         def response(_, answer):
             if answer == "clean":
                 def done(result, error):
                     if not error:
-                        self.toast(f"已清理 {len(result)} 张壁纸，收藏已保护")
+                        self.toast(f"已清理 {len(result)} 张壁纸，收藏和当前桌面壁纸已保护")
                         logging.getLogger("perch").info("手动清理 %s 张普通壁纸", len(result))
                         self.refresh_library()
-                self.task(lambda: library.prune(keep, names), done)
+                self.task(lambda: library.prune(keep, names, backend), done)
         dialog.connect("response", response)
         dialog.present()
 

@@ -84,11 +84,11 @@ def main():
             print(f"已同步 {synced} 张反馈壁纸的标签与色调；{pending} 张待后续同步")
             return 1 if fetcher.unavailable else 0
         if args.command == "cleanup":
-            candidates = library.cleanup_candidates(config.keep)
+            candidates = library.cleanup_candidates(config.keep, config.wallpaper_backend)
             for item in candidates:
                 print(item.path.name)
             if args.apply:
-                print(f"已清理 {len(library.prune(config.keep, {p.path.name for p in candidates}))} 张；收藏已保护")
+                print(f"已清理 {len(library.prune(config.keep, {p.path.name for p in candidates}, config.wallpaper_backend))} 张；收藏和当前桌面壁纸已保护")
             else:
                 print(f"将清理 {len(candidates)} 张普通壁纸；添加 --apply 执行")
             return 0

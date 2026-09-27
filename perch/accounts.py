@@ -149,7 +149,7 @@ def sync_collections(config, library, account, client=None):
                     if temp_path:
                         temp_path.unlink(missing_ok=True)
         if summary['downloaded']:
-            library.prune(config.keep)
+            library.prune(config.keep, backend=config.wallpaper_backend)
     LOG.info('收藏夹同步完成 · 新导入 %s · 下载 %s · 筛选或本地反馈跳过 %s · 已同步 %s',
              summary['imported'], summary['downloaded'], summary['skipped'], summary['unchanged'])
     return summary

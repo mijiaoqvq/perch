@@ -452,5 +452,6 @@ def check():
     return True
 
 GLib.timeout_add(1200, check)
-app.run([])
+with patch('perch.library.current_wallpapers', return_value=set()):
+    app.run([])
 raise SystemExit(1 if errors or stage < 39 else 0)

@@ -18,6 +18,10 @@ from perch.scheduler import timer_text
 
 class TemporaryLibrary(unittest.TestCase):
     def setUp(self):
+        # Unit tests have an isolated desktop; they must not query the real session.
+        desktop_patch = patch('perch.library.current_wallpapers', return_value=set())
+        self.desktop = desktop_patch.start()
+        self.addCleanup(desktop_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
