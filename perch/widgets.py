@@ -11,6 +11,62 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
 from .appearance import desktop_font_family
 
 
+class ScrollRestore:
+    """Restore a position after GTK allocates changed content, coalescing refreshes."""
+    def __init__(self, scroll):
+        self.scroll = scroll
+        self.target = None
+        self.tick = 0
+        self.idle = 0
+
+    def schedule(self, target):
+        self.target = target
+        if self.tick:
+            self.scroll.remove_tick_callback(self.tick)
+        if self.idle:
+            GLib.source_remove(self.idle)
+            self.idle = 0
+        self.tick = self.scroll.add_tick_callback(self.after_frame)
+
+    def after_frame(self, *_):
+        self.tick = 0
+        # Tick callbacks run before layout. An idle after that frame sees the
+        # new child allocations and adjustment bounds, including wrapped text.
+        self.idle = GLib.idle_add(self.restore, priority=GLib.PRIORITY_LOW)
+        return GLib.SOURCE_REMOVE
+
+    def restore(self):
+        self.idle = 0
+        target, self.target = self.target, None
+        adjustment = self.scroll.get_vadjustment()
+        value = target()
+        adjustment.set_value(max(adjustment.get_lower(), min(value,
+                             adjustment.get_upper() - adjustment.get_page_size())))
+        return GLib.SOURCE_REMOVE
+
+
+def text_overlap(previous, current):
+    """Length of the old suffix retained by a bounded, append-only log tail."""
+    if current.startswith(previous):
+        return len(previous)
+    # KMP avoids quadratic work when a log contains many repeated lines.
+    prefix = [0] * len(current)
+    matched = 0
+    for index in range(1, len(current)):
+        while matched and current[index] != current[matched]:
+            matched = prefix[matched - 1]
+        if current[index] == current[matched]:
+            matched += 1
+        prefix[index] = matched
+    matched = 0
+    for char in previous:
+        while matched and (matched == len(current) or char != current[matched]):
+            matched = prefix[matched - 1]
+        if current and char == current[matched]:
+            matched += 1
+    return matched
+
+
 def tag_cloud():
     if hasattr(Adw, "WrapBox"):
         return Adw.WrapBox(child_spacing=6, line_spacing=8, natural_line_length=600)

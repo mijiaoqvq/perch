@@ -23,7 +23,7 @@ from .preference_ui import PreferencePages
 from .desktop import set_wallpaper
 from .downloader import Client
 from .recommendation import CALIBRATION_SAMPLES, TagFetcher, learning_model, sync_feedback
-from .widgets import SystemFont, TagChip, tag_cloud
+from .widgets import ScrollRestore, SystemFont, TagChip, tag_cloud, text_overlap
 
 CSS = """
 window { background: @window_bg_color; color: @window_fg_color; }
@@ -328,6 +328,10 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.gallery_stack.set_vexpand(True)
         page.append(self.gallery_stack)
         scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.gallery_scroll = scroll
+        self.gallery_position = ScrollRestore(scroll)
+        self.gallery_view_key = None
+        self.gallery_rows = {}
         self.flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                                column_spacing=16, row_spacing=16, min_children_per_line=1,
                                max_children_per_line=4, valign=Gtk.Align.START)
@@ -627,7 +631,20 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
     def render_gallery(self):
         if not hasattr(self, "flow"):
             return
+        view_key = (str(self.library.directory), self.page_name, self.likes_view,
+                    self.search.get_text(), self.order.get_selected())
+        if view_key != self.gallery_view_key:
+            target = lambda: 0
+        else:
+            target = self.gallery_position.target or self.gallery_anchor()
+        self.gallery_view_key = view_key
+        # Removing the focused button can make GTK focus/scroll to the first
+        # new card. Leave focus unset until the user chooses another control.
+        focus = self.get_focus()
+        if focus and focus.is_ancestor(self.flow):
+            self.set_focus(None)
         self.flow.remove_all()
+        self.gallery_rows = {}
         items = [i for i in self.items if (self.page_name != "favorites" or i.favorite)
                  and (self.page_name != "likes" or i.liked)
                  and self.search.get_text().lower() in i.path.name.lower()]
@@ -650,6 +667,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         if tags_view:
             self.count_label.set_text("偏好保存在本机 · 标签和色调调整不会更改喜欢或收藏状态")
             self.gallery_stack.set_visible_child_name(self.likes_view)
+            self.gallery_position.schedule(target)
             return
         self.gallery_stack.set_visible_child_name("images" if items else "empty")
         if self.search.get_text():
@@ -699,6 +717,28 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
             footer.append(label(status, "caption"))
             card.append(footer)
             self.flow.append(card)
+            self.gallery_rows[item.wid] = card.get_parent()
+        self.gallery_position.schedule(target)
+
+    def gallery_anchor(self):
+        value = self.gallery_scroll.get_vadjustment().get_value()
+        if value <= 0:
+            return lambda: 0
+        # Prefer the first visible row; if it disappears, keep a neighbouring
+        # surviving card at its old offset. New downloads may be inserted above.
+        anchors = []
+        for wid, row in self.gallery_rows.items():
+            allocation = row.get_allocation()
+            if allocation.height:
+                anchors.append((wid, allocation.y - value, allocation.height))
+        anchors.sort(key=lambda anchor: (anchor[1] + anchor[2] <= 0, abs(anchor[1])))
+        def target():
+            for wid, offset, _ in anchors:
+                row = self.gallery_rows.get(wid)
+                if row and row.get_allocated_height():
+                    return row.get_allocation().y - offset
+            return value
+        return target
 
     def like_button(self, item, preview=None):
         widget = button(text=("取消喜欢" if item.liked else "喜欢") if preview else None,
@@ -1175,6 +1215,9 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.log_view = Gtk.TextView(editable=False, cursor_visible=False, wrap_mode=Gtk.WrapMode.WORD_CHAR)
         self.log_view.add_css_class("log")
         scroll = Gtk.ScrolledWindow(vexpand=True, margin_top=14)
+        self.log_scroll = scroll
+        self.log_position = ScrollRestore(scroll)
+        self.log_text = ""
         scroll.set_child(self.log_view)
         page.append(scroll)
         page.append(button("刷新记录", "view-refresh-symbolic", self.read_logs))
@@ -1186,10 +1229,43 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
             with path.open("rb") as stream:
                 stream.seek(0, 2)
                 stream.seek(max(0, stream.tell() - 50000))
-                text = stream.read().decode("utf-8", errors="replace")
+                tail = stream.read()
+                # A byte limit can split a Chinese character. Skip only leading
+                # continuation bytes so retained text still matches the old tail.
+                start = 0
+                while start < len(tail) and tail[start] & 0xC0 == 0x80:
+                    start += 1
+                text = tail[start:].decode("utf-8", errors="replace")
         except FileNotFoundError:
             text = "还没有更新记录。下一次风景，正在路上。"
-        self.log_view.get_buffer().set_text(text or "还没有更新记录。下一次风景，正在路上。")
+        text = text or "还没有更新记录。下一次风景，正在路上。"
+        if text == self.log_text:
+            return
+        buffer = self.log_view.get_buffer()
+        target = self.log_position.target
+        if target is None:
+            adjustment = self.log_scroll.get_vadjustment()
+            at_bottom = not self.log_text or adjustment.get_value() >= adjustment.get_upper() - adjustment.get_page_size() - 2
+            if at_bottom:
+                target = lambda: adjustment.get_upper() - adjustment.get_page_size()
+            else:
+                rect = self.log_view.get_visible_rect()
+                _, iterator = self.log_view.get_iter_at_location(rect.x, rect.y)
+                offset = rect.y - self.log_view.get_iter_location(iterator).y
+                mark = buffer.create_mark(None, iterator, True)
+                def target():
+                    iterator = buffer.get_iter_at_mark(mark)
+                    value = self.log_view.get_iter_location(iterator).y + offset
+                    buffer.delete_mark(mark)
+                    return value
+        overlap = text_overlap(self.log_text, text)
+        # Keep retained text (and its selection/marks) intact. This also handles
+        # the 50 KB tail moving forward, or rotation with no retained history.
+        if overlap < len(self.log_text):
+            buffer.delete(buffer.get_start_iter(), buffer.get_iter_at_offset(len(self.log_text) - overlap))
+        buffer.insert(buffer.get_end_iter(), text[overlap:])
+        self.log_text = text
+        self.log_position.schedule(target)
 
     def poll(self):
         if self.closed:
