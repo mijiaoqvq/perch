@@ -2,6 +2,7 @@
 from gi.repository import Gtk
 from . import accounts, colors
 from .recommendation import CALIBRATION_SAMPLES
+from .learning import FAVORITE_STRENGTH
 from .widgets import TagChip, tag_cloud
 
 
@@ -70,6 +71,8 @@ class PreferencePages:
                     origin = '手动设置 · ' + {'prefer': '更多推荐', 'avoid': '减少推荐', 'ignore': '保持中立'}[row['mode']]
                 chip.panel.append(label(origin, 'caption'))
                 chip.panel.append(label(f"{row['positive']} 次正面反馈 · {row['negative']} 次不喜欢", 'caption'))
+                if row['favorites']:
+                    chip.panel.append(label(f"其中 {row['favorites']} 张收藏 · 喜欢强度 {FAVORITE_STRENGTH:g} 倍，样本不重复", 'caption', wrap=True))
                 chip.panel.append(label(row['reason'] if row['mode'] == 'auto' else '手动设置优先于自动学习', 'caption', wrap=True))
                 if row['accepted']:
                     chip.panel.append(label(f"{row['accepted']} 张展示后自然淘汰 · 仅提供有上限的弱接受信号", 'caption', wrap=True))

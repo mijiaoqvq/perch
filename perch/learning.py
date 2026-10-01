@@ -8,6 +8,7 @@ import time
 
 CALIBRATION_SAMPLES = 20
 MIN_TAG_SAMPLES = 3
+FAVORITE_STRENGTH = 1.5
 EXPOSURE_SECONDS = 10
 EXPLICIT_HALF_LIFE = 90 * 86400
 IMPLICIT_HALF_LIFE = 30 * 86400
@@ -21,17 +22,20 @@ def decay(created, now, half_life):
     return 2 ** (-max(0., now - created) / half_life)
 
 
-def direction(positive, negative, other_positive=0., other_negative=0.):
+def direction(positive, negative, other_positive=0., other_negative=0., support=None):
     """Symmetric Wilson-style uncertainty band, with a practical neutral zone.
 
     Fractional, time-decayed evidence is deliberately treated as fewer samples.
     The interval is an uncertainty guard, not a statistical coverage guarantee
     for biased/correlated recommendation feedback.
     """
-    total = positive + negative
+    mass = positive + negative
+    # Stronger intent changes the weighted preference, not the number of
+    # independent observations used by the uncertainty guard.
+    total = mass if support is None else min(mass, support)
     if total < 2:
         return 0., '有效证据不足，暂时中立'
-    probability = positive / total
+    probability = positive / mass
     z = 1.645
     denominator = 1 + z * z / total
     center = (probability + z * z / (2 * total)) / denominator
@@ -48,12 +52,12 @@ def direction(positive, negative, other_positive=0., other_negative=0.):
     others = other_positive + other_negative
     if others >= 5:
         baseline = (other_positive + 2) / (others + 4)
-        estimate = (positive + 2) / (total + 4)
+        estimate = (positive + 2) / (mass + 4)
         lift = (estimate - baseline) * (1 if weight > 0 else -1)
         if lift <= .05:
             return 0., '与其他壁纸相比没有明确偏好差异，暂时中立'
         weight *= min(1., (lift - .05) / .25)
-    weight *= total / (total + 4)
+    weight *= mass / (mass + 4)
     return weight, '明确反馈支持更多推荐' if weight > 0 else '明确反馈支持减少推荐'
 
 
@@ -61,6 +65,7 @@ def feature_model(library, features, overrides, include_favorites=True, now=None
     """One contribution per image/feature; explicit and passive counts stay separate."""
     now = time.time() if now is None else now
     feedback = library.feedback_records(include_favorites)
+    favorites = library.favorite_ids() if include_favorites else set()
     accepted = library.accepted_feedback()
     usable = {wid: {key: amount for key, amount in values.items() if overrides.get(key) != 'ignore'}
               for wid, values in features.items()}
@@ -70,12 +75,14 @@ def feature_model(library, features, overrides, include_favorites=True, now=None
     counts = {}
 
     def entry(key):
-        return counts.setdefault(key, dict(positive=0, negative=0, accepted=0,
+        return counts.setdefault(key, dict(positive=0, negative=0, accepted=0, favorites=0, support=0.,
                                  positive_mass=0., negative_mass=0., accepted_mass=0.,
                                  present_positive=0., present_negative=0.))
 
     for wid, (sign, created) in rated.items():
-        mass = decay(created, now, EXPLICIT_HALF_LIFE)
+        support = decay(created, now, EXPLICIT_HALF_LIFE)
+        favorite = sign > 0 and wid in favorites
+        mass = support * (FAVORITE_STRENGTH if favorite else 1.)
         if sign > 0:
             total_positive += mass
         else:
@@ -84,6 +91,8 @@ def feature_model(library, features, overrides, include_favorites=True, now=None
             row = entry(key)
             polarity = 'positive' if sign > 0 else 'negative'
             row[polarity] += 1
+            row['favorites'] += int(favorite)
+            row['support'] += support * amount
             row[polarity + '_mass'] += mass * amount
             row['present_' + polarity] += mass
     for wid, created in accepted.items():
@@ -98,6 +107,7 @@ def feature_model(library, features, overrides, include_favorites=True, now=None
         for key in features.get(wid, {}):
             if overrides.get(key) == 'ignore':
                 entry(key)['positive' if sign > 0 else 'negative'] += 1
+                entry(key)['favorites'] += int(sign > 0 and wid in favorites)
     for wid in accepted.keys() - feedback.keys():
         for key in features.get(wid, {}):
             if overrides.get(key) == 'ignore':
@@ -109,7 +119,7 @@ def feature_model(library, features, overrides, include_favorites=True, now=None
         calibrated = samples >= CALIBRATION_SAMPLES and row['positive'] + row['negative'] >= MIN_TAG_SAMPLES
         weight, reason = direction(row['positive_mass'], row['negative_mass'],
                                    total_positive - row['present_positive'],
-                                   total_negative - row['present_negative'])
+                                   total_negative - row['present_negative'], support=row['support'])
         if not calibrated:
             weight = 0.
             reason = '自动校准中，暂不推断偏好' if samples < CALIBRATION_SAMPLES else '明确反馈不足，暂时中立'

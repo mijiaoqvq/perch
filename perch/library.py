@@ -178,8 +178,12 @@ class Library:
         dates = {}
         with self.connect() as db:
             dates.update(db.execute('SELECT id, created FROM feedback_dates'))
-            for table in (('favorites',) if include_favorites else ()) + ('likes', 'dislikes'):
+            for table in ('likes', 'dislikes'):
                 dates.update(db.execute(f"SELECT id, CAST(strftime('%s', created) AS REAL) FROM {table}"))
+            if include_favorites:
+                for wid, created in db.execute("SELECT id, CAST(strftime('%s', created) AS REAL) FROM favorites"):
+                    if values.get(wid, 0) > 0 and created is not None:
+                        dates[wid] = max(dates.get(wid) or 0, created)
         now = time.time()
         return {wid: (sign, dates.get(wid) or now) for wid, sign in values.items()}
 

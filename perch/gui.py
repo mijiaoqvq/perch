@@ -24,6 +24,7 @@ from .preference_ui import PreferencePages
 from .desktop import set_wallpaper
 from .downloader import Client
 from .recommendation import CALIBRATION_SAMPLES, TagFetcher, learning_model, sync_feedback
+from .learning import FAVORITE_STRENGTH
 from .widgets import ScrollRestore, SystemFont, TagChip, tag_cloud, text_overlap
 
 CSS = """
@@ -293,8 +294,8 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         if row.page in ("library", "favorites", "likes"):
             self.stack.set_visible_child_name("gallery")
             self.gallery_title.set_text({"favorites": "我的收藏", "likes": "我喜欢的"}.get(row.page, "让桌面，常有新风景。"))
-            self.gallery_sub.set_text({"favorites": "收藏让喜欢的壁纸一直保留。取消喜欢，也会取消收藏。",
-                                       "likes": "从喜欢中学习，也听你的调整。喜欢表达偏好，收藏保留图片。"}.get(
+            self.gallery_sub.set_text({"favorites": "收藏表示更喜欢，并让壁纸一直保留。取消喜欢，也会取消收藏。",
+                                       "likes": "从喜欢中学习，也听你的调整。收藏表示更喜欢，并保留图片。"}.get(
                                            row.page, "喜欢让推荐更懂你，收藏让风景留下来。"))
             self.render_gallery()
         else:
@@ -498,6 +499,8 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
                 chip.panel.append(label(tag['name'], "heading", wrap=True))
                 origin = "自动学习" if tag['mode'] == 'auto' else "手动设置"
                 chip.panel.append(label(f"{title} · {origin}\n{tag['positive']} 次正面反馈 · {tag['negative']} 次不喜欢", "caption"))
+                if tag['favorites']:
+                    chip.panel.append(label(f"其中 {tag['favorites']} 张收藏 · 喜欢强度 {FAVORITE_STRENGTH:g} 倍，样本不重复", 'caption', wrap=True))
                 chip.panel.append(label(tag['reason'] if tag['mode'] == 'auto' else '手动设置优先于自动学习', 'caption', wrap=True))
                 if tag['accepted']:
                     chip.panel.append(label(f"{tag['accepted']} 张展示后自然淘汰 · 弱接受信号单独限额，不计入喜欢或校准", 'caption', wrap=True))
@@ -748,7 +751,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
             star = button(icon="starred-symbolic" if item.favorite else "non-starred-symbolic",
                           action=lambda i=item: self.toggle_favorite(i),
                           css="favorite" if item.favorite else "flat",
-                          tooltip="取消收藏（喜欢状态不变）" if item.favorite else "收藏，保留图片不被清理")
+                          tooltip="取消收藏，恢复普通喜欢" if item.favorite else "更喜欢并收藏，保留图片不被清理")
             star.set_valign(Gtk.Align.CENTER)
             if item.liked:
                 actions.append(star)
@@ -839,7 +842,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         library = self.library
         def done(_, error):
             if not error:
-                self.toast("已取消收藏，将按保留数量参与清理" if item.favorite else "已收藏，自动清理会跳过这张壁纸")
+                self.toast("已取消收藏，恢复普通喜欢并参与清理" if item.favorite else "已收藏：表达更强喜欢，自动清理会跳过这张壁纸")
                 self.refresh_library()
                 self.refresh_profile()
                 if not item.favorite:
@@ -1130,7 +1133,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.dropdown(group, "ratio", "严格宽高比", ["16x9", "16x10", "21x9", "any"],
                       ["16:9", "16:10", "21:9", "不限比例"], self.config.ratio)
         self.spin(group, "max_pages", "每个榜单最多扫描页数", self.config.max_pages, 1, 200)
-        group = self.group(page, "个性化推荐", "喜欢影响推荐但不防清理；收藏保护图片；不喜欢会降低相关标签优先级。")
+        group = self.group(page, "个性化推荐", f"收藏的喜欢强度为普通喜欢的 {FAVORITE_STRENGTH:g} 倍，并保护图片；不喜欢会降低相关标签优先级。")
         self.switch(group, "personalized", "根据标签与色调个性化推荐", self.config.personalized,
                     f"标签与色调各校准 {CALIBRATION_SAMPLES} 张有效反馈；手动设置可提前生效")
         group.add(button("在「我喜欢的」管理推荐标签", "emblem-favorite-symbolic", self.show_tag_manager))

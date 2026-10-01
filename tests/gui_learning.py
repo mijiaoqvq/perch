@@ -25,6 +25,8 @@ for index in range(29):
     positive = index < 5 if index < 9 else index < 19
     with library.connect() as db:
         db.execute(f'INSERT INTO {"likes" if positive else "dislikes"}(id) VALUES (?)', (wid,))
+        if index < 2:
+            db.execute('INSERT INTO favorites(id) VALUES (?)', (wid,))
     library.save_tags(wid, [{'id': 1 if index < 9 else 2, 'name': 'dress' if index < 9 else 'background'}])
     colors.save_palette(library, wid, ['0066cc' if index < 9 else '999999'])
 for index in range(10):
@@ -68,6 +70,7 @@ def check():
         assert chip.has_css_class('tag-neutral')
         text = '\n'.join(label_text(chip.panel))
         assert '5 次正面反馈 · 4 次不喜欢' in text
+        assert '其中 2 张收藏 · 喜欢强度 1.5 倍，样本不重复' in text
         assert '暂时中立' in text
         forest = win.tag_widgets['forest']['chip']
         assert forest.has_css_class('tag-neutral')
@@ -84,6 +87,7 @@ def check():
     elif stage == 3:
         assert win.color_widgets['blue']['chip'].has_css_class('tag-neutral')
         assert '暂时中立' in '\n'.join(label_text(win.color_widgets['blue']['chip'].panel))
+        assert '其中 2 张收藏 · 喜欢强度 1.5 倍，样本不重复' in '\n'.join(label_text(win.color_widgets['blue']['chip'].panel))
         win.nav.select_row(win.nav.get_row_at_index(0))
         win.present()
         stage = 4

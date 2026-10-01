@@ -1,3 +1,3 @@
 """栖景 · Perch — a quiet home for your wallpapers."""
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
