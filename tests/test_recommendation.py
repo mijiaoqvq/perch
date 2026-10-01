@@ -39,7 +39,8 @@ class FeedbackTests(TemporaryLibrary):
         self.library.prune(1)
         self.assertFalse(old.exists())
         self.assertEqual(self.library.feedback(), {'abcde0': 1})
-        self.assertGreater(self.library.tag_profile()[0]['weight'], 0)
+        self.assertEqual(self.library.tag_profile()[0]['positive'], 1)
+        self.assertEqual(self.library.tag_profile()[0]['weight'], 0)  # Still calibrating.
 
     def test_unlike_clears_favorite_and_unfavorite_keeps_like(self):
         self.image('abcde0')
@@ -71,10 +72,12 @@ class FeedbackTests(TemporaryLibrary):
         self.library.mark_disliked('abcde0')
         self.assertEqual(self.library.feedback(), {'abcde0': -1})
         self.assertFalse(self.library.items()[0].liked)
-        self.assertLess(self.library.tag_profile()[0]['weight'], 0)
+        self.assertEqual(self.library.tag_profile()[0]['negative'], 1)
+        self.assertEqual(self.library.tag_profile()[0]['weight'], 0)
         self.library.set_liked('abcde0', True)
         self.assertFalse(self.library.items()[0].disliked)
-        self.assertGreater(self.library.tag_profile()[0]['weight'], 0)
+        self.assertEqual(self.library.tag_profile()[0]['positive'], 1)
+        self.assertEqual(self.library.tag_profile()[0]['weight'], 0)
         self.library.set_liked('abcde0', False)
         self.assertEqual(self.library.tag_profile(), [])
 
@@ -120,7 +123,8 @@ class TagCacheTests(TemporaryLibrary):
         client = TaggedClient(metadata={'abcde0': tags(1)})
         sync_feedback(self.config, self.library, TagFetcher(self.library, client))
         self.assertEqual(self.library.tags_for('abcde0'), tags(1))
-        self.assertGreater(self.library.tag_profile()[0]['weight'], 0)
+        self.assertEqual(self.library.tag_profile()[0]['positive'], 1)
+        self.assertEqual(self.library.tag_profile()[0]['weight'], 0)
 
     def test_failure_keeps_feedback_and_stops_metadata_requests_for_run(self):
         self.image('abcde0')
@@ -242,4 +246,5 @@ class RankingTests(TemporaryLibrary):
         replace_wallpaper(self.config, self.library, 'abcde0', client)
         self.assertFalse(original.exists())
         self.assertEqual(self.library.tags_for('abcde0'), tags(2))
-        self.assertLess(self.library.tag_profile()[0]['weight'], 0)
+        self.assertEqual(self.library.tag_profile()[0]['negative'], 1)
+        self.assertEqual(self.library.tag_profile()[0]['weight'], 0)

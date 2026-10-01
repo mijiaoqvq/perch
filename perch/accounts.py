@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import time
 import urllib.error
 
 from .config import atomic_write, config_path
@@ -138,6 +139,7 @@ def sync_collections(config, library, account, client=None):
                             summary['downloaded'] += 1
                         present = local is not None or destination is not None
                         db.execute('INSERT OR IGNORE INTO remote_likes VALUES (?)', (wid,))
+                        db.execute('INSERT OR IGNORE INTO feedback_dates VALUES (?, ?)', (wid, time.time()))
                         if mode >= 2:
                             db.execute('INSERT OR IGNORE INTO likes(id) VALUES (?)', (wid,))
                         if mode == 3 and present and not (blocked and blocked[1]):

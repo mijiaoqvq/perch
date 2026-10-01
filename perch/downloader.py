@@ -292,7 +292,7 @@ def _run(config, library, client=None, replacement_id=None):
                         library.remember(wid, digest)
                         continue
                     os.replace(temp_path, destination)
-                    library.remember(wid, digest)
+                    library.remember(wid, digest, item.get('_perch_source', 'discovery') if config.personalized else None)
                 added += 1
                 LOG.info("已下载 %s · %s / %s", wid, added, required)
             except (*IMAGE_ERRORS, urllib.error.URLError, http.client.HTTPException) as exc:
@@ -314,7 +314,7 @@ def _run(config, library, client=None, replacement_id=None):
                     return 0, destination
                 if library.finish_replacement(destination, backend=config.wallpaper_backend):
                     LOG.info("已用新壁纸替换之前标记为不喜欢的图片")
-                for name in library.prune(config.keep, backend=config.wallpaper_backend):
+                for name in library.prune(config.keep, backend=config.wallpaper_backend, natural=config.personalized):
                     LOG.info("清理旧壁纸：%s", name)
             if added >= required:
                 LOG.info("更新完成 · 新增 %s 张 · 收藏已保护", added)

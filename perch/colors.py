@@ -87,36 +87,19 @@ def set_override(library, key, mode):
 
 
 def learning_model(library):
-    from .recommendation import CALIBRATION_SAMPLES, MIN_TAG_SAMPLES
-    feedback = library.feedback()
-    counts = {key: [0, 0, 0., 0.] for key in TONES}
-    samples = set()
+    from .learning import feature_model
     with library.connect() as db:
         overrides = dict(db.execute('SELECT name, mode FROM color_overrides'))
-        for wid, raw in db.execute('SELECT id, colors FROM wallpaper_colors'):
-            if wid not in feedback:
-                continue
-            tones = {key: amount for key, amount in families(json.loads(raw)).items()
-                     if overrides.get(key) != 'ignore'}
-            if tones:
-                samples.add(wid)
-            for key, amount in tones.items():
-                sign = 0 if feedback[wid] > 0 else 1
-                counts[key][sign] += 1
-                counts[key][sign + 2] += amount
+        features = {wid: families(json.loads(raw)) for wid, raw in db.execute('SELECT id, colors FROM wallpaper_colors')}
+    samples, counts = feature_model(library, features, dict.fromkeys(TONES, 'auto') | overrides)
     profile = []
     for key, (name, swatch) in TONES.items():
-        pos, neg, pos_amount, neg_amount = counts[key]
-        mode = overrides.get(key, 'auto')
-        calibrated = len(samples) >= CALIBRATION_SAMPLES and pos + neg >= MIN_TAG_SAMPLES
-        weight = (pos_amount - 1.5 * neg_amount) / (pos + neg + 2) if calibrated else 0.
-        weight = {'prefer': 1., 'avoid': -1.5, 'ignore': 0.}.get(mode, weight)
-        profile.append(dict(key=key, name=name, swatch=swatch, mode=mode,
-                            positive=pos, negative=neg, weight=weight, calibrated=calibrated))
-    return len(samples), profile
+        profile.append(dict(counts[key], key=key, name=name, swatch=swatch))
+    return samples, profile
 
 
-def score(colors, profile):
-    weights = {row['key']: row['weight'] for row in profile if row['mode'] != 'ignore'}
+def score(colors, profile, implicit=False):
+    field = 'implicit_weight' if implicit else 'weight'
+    weights = {row['key']: row.get(field, 0.) for row in profile if row['mode'] != 'ignore' and row.get(field, 0.)}
     tones = {key: amount for key, amount in families(colors).items() if key in weights}
     return sum(weights[key] * amount for key, amount in tones.items()) / max(1., sum(tones.values()))

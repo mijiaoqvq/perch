@@ -53,6 +53,12 @@ class Library:
                        "like_blocked INTEGER DEFAULT 0, favorite_blocked INTEGER DEFAULT 0)")
             db.execute("CREATE TABLE IF NOT EXISTS collection_imports (account TEXT, collection TEXT, id TEXT, "
                        "mode INTEGER NOT NULL, PRIMARY KEY(account, collection, id))")
+            db.execute("CREATE TABLE IF NOT EXISTS feedback_dates (id TEXT PRIMARY KEY, created REAL NOT NULL)")
+            db.execute("INSERT OR IGNORE INTO feedback_dates SELECT id, ? FROM remote_likes", (time.time(),))
+            db.execute("CREATE TABLE IF NOT EXISTS exposures (id TEXT PRIMARY KEY, seconds REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS accepted (id TEXT PRIMARY KEY, created REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS deliveries (sequence INTEGER PRIMARY KEY AUTOINCREMENT, "
+                       "id TEXT NOT NULL UNIQUE, source TEXT NOT NULL, created REAL NOT NULL)")
 
     @contextmanager
     def connect(self):
@@ -118,12 +124,14 @@ class Library:
                 db.execute("INSERT INTO sync_exclusions(id, favorite_blocked) VALUES (?, 1) "
                            "ON CONFLICT(id) DO UPDATE SET favorite_blocked=1", (wid,))
 
-    def cleanup_candidates(self, keep, backend='auto'):
+    def cleanup_candidates(self, keep, backend='auto', observe_active=False):
         # Retain a disliked original until its replacement has been downloaded.
         ordinary = [item for item in self.items() if not item.favorite and not item.disliked]
         if not ordinary[keep:]:
             return []
         active = current_wallpapers(backend)
+        if observe_active:
+            self.observe([item.wid for item in ordinary if item.path.resolve() in active])
         # Keep the original retention cutoff; never delete a newer file in its place.
         return [item for item in ordinary[keep:] if item.path.resolve() not in active]
 
@@ -163,6 +171,48 @@ class Library:
                 values.update({row[0]: 1 for row in db.execute("SELECT id FROM favorites ORDER BY created, id")})
             values.update({row[0]: -1 for row in db.execute("SELECT id FROM dislikes ORDER BY created, id")})
         return values
+
+    def feedback_records(self, include_favorites=True):
+        """Effective current judgement and its date, never additive click counts."""
+        values = self.feedback(include_favorites)
+        dates = {}
+        with self.connect() as db:
+            dates.update(db.execute('SELECT id, created FROM feedback_dates'))
+            for table in (('favorites',) if include_favorites else ()) + ('likes', 'dislikes'):
+                dates.update(db.execute(f"SELECT id, CAST(strftime('%s', created) AS REAL) FROM {table}"))
+        now = time.time()
+        return {wid: (sign, dates.get(wid) or now) for wid, sign in values.items()}
+
+    def observe(self, wids, seconds=10):
+        """Local exposure only; seeing an image is not itself positive feedback."""
+        from .learning import EXPOSURE_SECONDS
+        if seconds <= 0:
+            return
+        rows = [(wid, min(float(seconds), EXPOSURE_SECONDS)) for wid in set(wids)
+                if isinstance(wid, str) and re.fullmatch(r'[a-z0-9]{6}', wid)]
+        if rows:
+            with self.connect() as db:
+                db.executemany('INSERT INTO exposures VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET '
+                               'seconds=min(?, seconds + excluded.seconds) WHERE seconds < ?',
+                               [(wid, amount, EXPOSURE_SECONDS, EXPOSURE_SECONDS) for wid, amount in rows])
+
+    def accepted_feedback(self):
+        with self.connect() as db:
+            return dict(db.execute('SELECT id, created FROM accepted WHERE id NOT IN '
+                                   '(SELECT id FROM sync_exclusions WHERE like_blocked=1)'))
+
+    def delivery_count(self):
+        with self.connect() as db:
+            return db.execute('SELECT COUNT(*) FROM deliveries').fetchone()[0]
+
+    def record_delivery(self, wid, source):
+        with self.connect() as db:
+            db.execute('INSERT OR IGNORE INTO deliveries(id, source, created) VALUES (?, ?, ?)',
+                       (wid, source, time.time()))
+
+    def recent_deliveries(self, limit=12):
+        with self.connect() as db:
+            return [row[0] for row in db.execute('SELECT id FROM deliveries ORDER BY sequence DESC LIMIT ?', (limit,))]
 
     def tags_for(self, wid):
         """None means not fetched yet; an empty list is a valid cached response."""
@@ -251,33 +301,33 @@ class Library:
         return len(samples)
 
     def tag_profile(self, include_favorites=True, include_specs=False, spec_policy=None):
+        from .learning import feature_model
         policy = spec_policy if spec_policy is not None else self.spec_policy()
-        feedback = self.feedback(include_favorites)
-        counts = {}
+        features = {}
         with self.connect() as db:
             known = {tag_key(name): (tid, name) for tid, name in db.execute("SELECT id, name FROM tags")}
-            counted = set()
             for wid, tid, name in db.execute("SELECT wallpaper_id, tags.id, tags.name FROM wallpaper_tags "
                                              "JOIN tags ON tag_id=tags.id"):
-                key = tag_key(name)
-                if wid not in feedback or (wid, key) in counted:
-                    continue
-                counted.add((wid, key))
-                tag = counts.setdefault(key, dict(id=tid, key=key, name=name, positive=0, negative=0, mode="auto"))
-                tag["positive" if feedback[wid] > 0 else "negative"] += 1
-            for key, name, mode in db.execute("SELECT name, label, mode FROM tag_overrides"):
-                tid, label = known.get(key, (None, name))
-                tag = counts.setdefault(key, dict(id=tid, key=key, name=label, positive=0, negative=0))
-                tag["mode"] = mode
-        for tag in counts.values():
-            pos, neg = tag["positive"], tag["negative"]
-            tag["auto_weight"] = (pos - 1.5 * neg) / (pos + neg + 2)
-            tag["weight"] = {"prefer": 1.0, "avoid": -1.5, "ignore": 0.0}.get(tag["mode"], tag["auto_weight"])
-            tag["technical"] = bool(policy(tag["name"]))
-            tag["ignored"] = tag["technical"] or tag["mode"] == "ignore"
+                features.setdefault(wid, {})[tag_key(name)] = 1.
+            overrides = {}
+            for key, name, mode in db.execute('SELECT name, label, mode FROM tag_overrides'):
+                known.setdefault(key, (None, name))
+                overrides[key] = mode
+        # Specs are excluded from calibration, inference and its baseline too.
+        technical = {key for key, (_, name) in known.items() if policy(name)}
+        neutral = overrides | {key: 'ignore' for key in technical}
+        _, counts = feature_model(self, features, neutral, include_favorites)
+        profile = []
+        for key, tag in counts.items():
+            tid, name = known[key]
+            tag.update(id=tid, key=key, name=name, mode=overrides.get(key, 'auto'),
+                       technical=key in technical, ignored=key in technical or overrides.get(key) == 'ignore')
             if tag["ignored"]:
                 tag["weight"] = 0.0
-        return sorted((tag for tag in counts.values() if include_specs or not tag["technical"]),
+                tag['implicit_weight'] = 0.0
+            if tag['positive'] or tag['negative'] or tag['accepted'] or key in overrides:
+                profile.append(tag)
+        return sorted((tag for tag in profile if include_specs or not tag["technical"]),
                       key=lambda tag: (-tag["weight"], tag["key"]))
 
     def finish_replacement(self, replacement, wid=None, backend='auto'):
@@ -304,11 +354,11 @@ class Library:
                     item.path.unlink(missing_ok=True)
             return True
 
-    def prune(self, keep, approved=None, backend='auto'):
+    def prune(self, keep, approved=None, backend='auto', natural=False):
         """Only delete current excess files; optionally intersect a reviewed list."""
         removed = []
         with self.locked():
-            for item in self.cleanup_candidates(keep, backend):
+            for item in self.cleanup_candidates(keep, backend, observe_active=natural):
                 if approved is not None and item.path.name not in approved:
                     continue
                 if item.path.is_symlink():
@@ -317,7 +367,16 @@ class Library:
                 # may have selected another image since the preview or last deletion.
                 if item.path.resolve() in current_wallpapers(backend):
                     continue
-                item.path.unlink(missing_ok=True)
+                try:
+                    item.path.unlink()
+                except FileNotFoundError:
+                    continue
+                if natural and not item.liked and item.wid not in self.feedback():
+                    from .learning import EXPOSURE_SECONDS
+                    with self.connect() as db:
+                        db.execute('INSERT OR IGNORE INTO accepted SELECT id, ? FROM exposures WHERE id=? '
+                                   'AND seconds>=? AND id NOT IN (SELECT id FROM sync_exclusions WHERE like_blocked=1)',
+                                   (time.time(), item.wid, EXPOSURE_SECONDS))
                 removed.append(item.path.name)
         return removed
 
@@ -327,6 +386,9 @@ class Library:
                               "UNION ALL SELECT 1 FROM dislikes WHERE id=? LIMIT 1",
                               (wid, digest, wid)).fetchone() is not None
 
-    def remember(self, wid, digest):
+    def remember(self, wid, digest, delivery_source=None):
         with self.connect() as db:
             db.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)", (wid, digest))
+            if delivery_source is not None:
+                db.execute('INSERT OR IGNORE INTO deliveries(id, source, created) VALUES (?, ?, ?)',
+                           (wid, delivery_source, time.time()))

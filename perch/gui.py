@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
 import gi
 
@@ -164,6 +165,9 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.refresh_busy = False
         self.library_signature = None
         self.closed = False
+        self.preview_windows = {}
+        self.exposure_since = {}
+        self.exposure_recorded = set()
         self.connect("close-request", self.on_close)
         self.toast_overlay = Adw.ToastOverlay()
         self.set_content(self.toast_overlay)
@@ -217,10 +221,43 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.refresh_library()
         self.poll()
         GLib.timeout_add_seconds(4, self.poll)
+        GLib.timeout_add_seconds(2, self.observe_visible_wallpapers)
 
     def on_close(self, *_):
         self.closed = True
         return False
+
+    def visible_wallpapers(self):
+        visible = {wid for wid, window in self.preview_windows.items() if window.get_visible() and window.is_active()}
+        if (self.is_active() and self.flow.get_mapped()
+                and self.page_name in ('library', 'favorites', 'likes')):
+            adjustment = self.gallery_scroll.get_vadjustment()
+            top, bottom = adjustment.get_value(), adjustment.get_value() + adjustment.get_page_size()
+            for wid, row in self.gallery_rows.items():
+                bounds = row.get_allocation()
+                if bounds.height and min(bottom, bounds.y + bounds.height) - max(top, bounds.y) >= bounds.height / 2:
+                    visible.add(wid)
+        return visible
+
+    def observe_visible_wallpapers(self):
+        from .learning import EXPOSURE_SECONDS
+        if self.closed:
+            return GLib.SOURCE_REMOVE
+        visible = self.visible_wallpapers() if self.config.personalized else set()
+        now = time.monotonic()
+        # Only foreground, actually visible cards/previews count. Merely fetching
+        # metadata, keeping the GUI open in the background or downloading does not.
+        self.exposure_since = {wid: self.exposure_since.get(wid, now) for wid in visible}
+        due = {wid for wid, start in self.exposure_since.items()
+               if now - start >= EXPOSURE_SECONDS and wid not in self.exposure_recorded}
+        if due:
+            self.exposure_recorded.update(due)
+            library = self.library
+            def done(_, error):
+                if error:
+                    self.exposure_recorded.difference_update(due)
+            self.task(lambda: library.observe(due), done)
+        return GLib.SOURCE_CONTINUE
 
     def toast(self, text):
         if not self.closed:
@@ -394,7 +431,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         self.tag_add_button = button("添加标签", "list-add-symbolic", self.add_tag_override, "suggested-action")
         add.append(self.tag_add_button)
         self.tag_editor.append(add)
-        self.tag_editor.append(label("悬停或点击标签，查看反馈和调整偏好。手动调整立即保存。", "caption", wrap=True))
+        self.tag_editor.append(label("相近或不足的反馈暂时中立；展示后自然淘汰仅作弱参考。悬停或点击标签可查看原因和调整偏好。", "caption", wrap=True))
         self.tag_rows = box(spacing=16)
         self.tag_editor.append(self.tag_rows)
         neutral = box(Gtk.Orientation.HORIZONTAL, 12)
@@ -461,6 +498,9 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
                 chip.panel.append(label(tag['name'], "heading", wrap=True))
                 origin = "自动学习" if tag['mode'] == 'auto' else "手动设置"
                 chip.panel.append(label(f"{title} · {origin}\n{tag['positive']} 次正面反馈 · {tag['negative']} 次不喜欢", "caption"))
+                chip.panel.append(label(tag['reason'] if tag['mode'] == 'auto' else '手动设置优先于自动学习', 'caption', wrap=True))
+                if tag['accepted']:
+                    chip.panel.append(label(f"{tag['accepted']} 张展示后自然淘汰 · 弱接受信号单独限额，不计入喜欢或校准", 'caption', wrap=True))
                 widgets = dict(chip=chip)
                 if tone == "muted":
                     chip.panel.append(label("不参与评分，也不会被自动加回。", "caption", wrap=True))
@@ -818,6 +858,12 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
     def preview(self, item):
         win = Gtk.Window(title=f"{item.wid.upper()} · 栖景", transient_for=self, modal=True,
                          default_width=980, default_height=650)
+        self.preview_windows[item.wid] = win
+        def closed(*_):
+            if self.preview_windows.get(item.wid) is win:
+                del self.preview_windows[item.wid]
+            return False
+        win.connect('close-request', closed)
         root = box(spacing=14)
         head = Gtk.HeaderBar()
         win.set_titlebar(head)
@@ -871,7 +917,12 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         if self.app.demo:
             self.toast("预览模式不会更改桌面壁纸")
             return
-        self.task(lambda: set_wallpaper(item.path, self.config.wallpaper_backend),
+        library = self.library
+        def work():
+            set_wallpaper(item.path, self.config.wallpaper_backend)
+            if self.config.wallpaper_backend != 'none' and self.config.personalized:
+                library.observe([item.wid])
+        self.task(work,
                   lambda _, error: self.toast("已设为桌面壁纸") if not error else None)
 
     def tag_text(self, wid):
@@ -888,7 +939,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
         library, config = self.library, self.config
         def work():
             feedback = library.feedback()
-            pending = sum(library.tags_for(wid) is None for wid in feedback)
+            pending = sum(library.tags_for(wid) is None for wid in feedback.keys() | library.accepted_feedback().keys())
             samples, profile = learning_model(library, include_specs=True)
             color_samples, color_profile = colors.learning_model(library)
             return feedback, pending, samples, profile, color_samples, color_profile
@@ -940,7 +991,7 @@ class PerchWindow(PreferencePages, Adw.ApplicationWindow):
             for target in pending:
                 fetcher.get(target)
             sync_feedback(config, library, fetcher)
-            targets = set(library.feedback()) | pending
+            targets = set(library.feedback()) | set(library.accepted_feedback()) | pending
             return fetcher.unavailable or any(library.tags_for(target) is None for target in targets)
         def done(unavailable, error):
             self.tag_sync_busy = False

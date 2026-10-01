@@ -44,7 +44,7 @@ class PreferencePages:
         for title, tone, condition in (
                 ('更多推荐', 'positive', lambda row: row['weight'] > 0),
                 ('减少推荐', 'negative', lambda row: row['weight'] < 0),
-                ('可选色调', 'neutral', lambda row: row['weight'] == 0 and row['mode'] != 'ignore'),
+                ('暂时中立', 'neutral', lambda row: row['weight'] == 0 and row['mode'] != 'ignore'),
                 ('保持中立', 'muted', lambda row: row['mode'] == 'ignore')):
             rows = [row for row in profile if condition(row)]
             if not rows:
@@ -65,11 +65,14 @@ class PreferencePages:
                 content.append(label(row['name']))
                 chip.set_child(content)
                 chip.panel.append(label(row['name'], 'heading'))
-                origin = '自动学习' if row['calibrated'] else '自动校准中'
+                origin = '自动学习' if samples >= CALIBRATION_SAMPLES else '自动校准中'
                 if row['mode'] != 'auto':
                     origin = '手动设置 · ' + {'prefer': '更多推荐', 'avoid': '减少推荐', 'ignore': '保持中立'}[row['mode']]
                 chip.panel.append(label(origin, 'caption'))
                 chip.panel.append(label(f"{row['positive']} 次正面反馈 · {row['negative']} 次不喜欢", 'caption'))
+                chip.panel.append(label(row['reason'] if row['mode'] == 'auto' else '手动设置优先于自动学习', 'caption', wrap=True))
+                if row['accepted']:
+                    chip.panel.append(label(f"{row['accepted']} 张展示后自然淘汰 · 仅提供有上限的弱接受信号", 'caption', wrap=True))
                 widgets = dict(chip=chip)
                 for mode, caption in (('prefer', '更多推荐'), ('avoid', '减少推荐'), (None, '自动学习'), ('ignore', '保持中立')):
                     control = button(caption, action=lambda key=row['key'], mode=mode: self.change_color_override(key, mode),

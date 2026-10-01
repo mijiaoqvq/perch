@@ -57,6 +57,10 @@ class ColorTests(TemporaryLibrary):
             with self.library.connect() as db:
                 db.execute('INSERT INTO dislikes(id) VALUES (?)', (wid,))
             colors.save_palette(self.library, wid, ['cc3333'])
+        self.assertEqual(next(row for row in colors.learning_model(self.library)[1] if row['key'] == 'red')['weight'], 0)
+        with self.library.connect() as db:
+            db.execute("INSERT INTO dislikes(id) VALUES ('bad003')")
+        colors.save_palette(self.library, 'bad003', ['cc3333'])
         self.assertLess(next(row for row in colors.learning_model(self.library)[1] if row['key'] == 'red')['weight'], 0)
 
     def test_color_preference_ranks_before_calibration_preserves_filters_and_queries(self):

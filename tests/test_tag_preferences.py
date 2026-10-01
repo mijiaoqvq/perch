@@ -25,6 +25,8 @@ class TagPreferenceTests(TemporaryLibrary):
 
     def test_manual_preference_wins_over_opposite_feedback(self):
         self.feedback('learn0', tags(1), positive=False)
+        for index in range(19):
+            self.feedback(f'past{index:02}', tags(1), positive=False)
         self.library.set_tag_override('sky', 'prefer')
         profile = self.library.tag_profile()
         self.assertLess(profile[0]['auto_weight'], 0)
@@ -37,6 +39,8 @@ class TagPreferenceTests(TemporaryLibrary):
 
     def test_manual_avoid_wins_over_positive_feedback(self):
         self.feedback('learn0', tags(1))
+        for index in range(19):
+            self.feedback(f'past{index:02}', tags(1))
         self.library.set_tag_override('sky', 'avoid')
         profile = self.library.tag_profile()
         self.assertGreater(profile[0]['auto_weight'], 0)
@@ -59,7 +63,8 @@ class TagPreferenceTests(TemporaryLibrary):
         self.assertEqual(score_tags(tags(1, 2), profile), score_tags(tags(2), profile))
         self.assertEqual(reopened.tags_for('learn1'), tags(1))
         reopened.set_tag_override('sky', None)
-        self.assertGreater(score_tags(tags(1), reopened.tag_profile()), 0)
+        self.assertEqual(next(tag for tag in reopened.tag_profile() if tag['name'] == 'sky')['positive'], 2)
+        self.assertEqual(score_tags(tags(1), reopened.tag_profile()), 0)  # Two judgements are not enough.
 
     def test_new_manual_tag_matches_by_name_then_uses_cached_id(self):
         self.library.set_tag_override('Cherry Blossoms', 'prefer')
